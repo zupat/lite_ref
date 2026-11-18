@@ -1,6 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lite_ref/lite_ref.dart';
+import 'package:material_ui/material_ui.dart';
 
 void main() {
   test('overriden instance should be equal to main', () {
