@@ -1,3 +1,27 @@
+## 0.8.1
+
+Patch release with lifecycle fixes for `LiteRefScope`. There are no public API
+changes.
+
+-   [Fix] Fixed a leak where a widget moved to another `LiteRefScope` with a
+    `GlobalKey` kept its old auto-dispose bindings, and therefore its old
+    instance, alive until the previous scope unmounted.
+-   [Fix] Fixed stale instances when a scope's overrides change in place.
+    Replacing an override now recreates the instance for that ref and notifies
+    mounted consumers, including consumers of `autoDispose: false` refs and
+    family refs whose argument is `null`.
+-   [Fix] Fixed `onlyOverrides` scopes resolving refs from a stale parent after
+    being moved with a `GlobalKey`, and not re-resolving when `onlyOverrides`
+    is toggled.
+-   [Fix] An override now follows its own `autoDispose` flag instead of the
+    original ref's, so it can enable or disable auto-disposal independently.
+-   [Behavior] Mounted consumers now switch to the new instance when a scope's
+    overrides or `onlyOverrides` change, instead of keeping the instance they
+    first resolved. Instances that are no longer in use are disposed once they
+    have no consumers. This can happen earlier than before, so code that keeps
+    a reference to a scoped instance in a callback or a long-lived object must
+    not use it after the scope changes.
+
 ## 0.8.0
 
 -   [Fix] Fixed bug with hot-reloading

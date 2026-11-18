@@ -27,6 +27,8 @@ class ScopedObject<T> {
 
   int _watchCount = 0;
 
+  bool _disposed = false;
+
   ScopedObject<T> _copy() {
     return ScopedObject(
       id: _id,
@@ -37,6 +39,8 @@ class ScopedObject<T> {
   }
 
   void _dispose() {
+    if (_disposed) return;
+    _disposed = true;
     if (_instance == null) return;
     _onDispose?.call(_instance);
     if (autoDispose && _onDispose == null) {

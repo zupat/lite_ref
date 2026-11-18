@@ -82,18 +82,26 @@ class ScopedRef<T> implements IScopedRef<T> {
       'This must be called with the context of a Widget.',
     );
 
-    final element = LiteRefScope._of(context, this);
+    final traversedScopes = <_RefScopeElement>[];
+    final element = LiteRefScope._of(context, this, traversed: traversedScopes);
 
     final existing = element._cache[_id];
 
-    void autoDisposeIfNeeded(ScopedObject<dynamic> ref) {
-      if (autoDispose && listen) {
-        element._addAutoDisposeBinding(context as Element, ref);
+    void bindIfNeeded(ScopedObject<dynamic> ref) {
+      if (!listen) return;
+
+      // Scopes that were traversed but did not serve the ref must notify
+      // this consumer when their overrides change (e.g. an `onlyOverrides`
+      // scope that gains an override for this ref).
+      for (final traversed in traversedScopes) {
+        traversed._addDependent(context as Element);
       }
+
+      element._bind(context as Element, ref);
     }
 
     if (existing != null) {
-      autoDisposeIfNeeded(existing);
+      bindIfNeeded(existing);
       return existing._instance as T;
     }
 
@@ -102,13 +110,13 @@ class ScopedRef<T> implements IScopedRef<T> {
     if (refOverride != null) {
       final refObject = (refOverride as ScopedRef)._createRefObject(context);
       element._cache[refObject._id] = refObject;
-      autoDisposeIfNeeded(refObject);
+      bindIfNeeded(refObject);
       return refObject._instance as T;
     }
 
     final refObject = _createRefObject(context);
 
-    autoDisposeIfNeeded(refObject);
+    bindIfNeeded(refObject);
 
     element._cache[refObject._id] = refObject;
 
