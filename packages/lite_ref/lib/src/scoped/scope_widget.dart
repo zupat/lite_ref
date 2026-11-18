@@ -399,9 +399,13 @@ class _RefScopeElement extends InheritedElement {
       ref._dispose();
     }
 
+    // Only reachable when the scope unmounts in the same frame in which an
+    // override change evicted these refs, before the post-frame flush runs.
+    // coverage:ignore-start
     for (final ref in _evictedRefs) {
       ref._dispose();
     }
+    // coverage:ignore-end
 
     _cache.clear();
     _oldRefs.clear();

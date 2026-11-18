@@ -1406,6 +1406,63 @@ void main() {
     expect(disposed, [0]);
   });
 
+  testWidgets(
+    'should release the binding when an override disables autoDispose',
+    (tester) async {
+      final disposed = <int>[];
+      final current = ValueNotifier(0);
+      final countRef = Ref.scoped((ctx) => 0, dispose: disposed.add);
+
+      // Kept as a constant instance so it only rebuilds when notified.
+      final consumer = Builder(
+        builder: (context) => Text('got: ${countRef(context)}'),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LiteRefScope(
+            child: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return LiteRefScope(
+                  onlyOverrides: true,
+                  overrides: current.value == 0
+                      ? null
+                      : {
+                          countRef.overrideWith(
+                            (_) => 1,
+                            autoDispose: false,
+                          ),
+                        },
+                  child: consumer,
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(find.text('got: 0'), findsOneWidget);
+      expect(disposed, isEmpty);
+
+      current.value = 1;
+      await tester.pumpAndSettle();
+
+      expect(find.text('got: 1'), findsOneWidget);
+      // The old auto-dispose binding is released even though the replacement
+      // opts out of auto-disposal.
+      expect(disposed, [0]);
+
+      // The replacement is not auto-disposed with the scope.
+      await tester.pumpWidget(const MaterialApp(home: Text('')));
+      await tester.pumpAndSettle();
+
+      expect(disposed, [0]);
+    },
+  );
+
   group('ScopedFamilyRef', () {
     testWidgets(
       'should auto-dispose an override that enables autoDispose',
