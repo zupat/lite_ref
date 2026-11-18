@@ -952,7 +952,509 @@ void main() {
     expect(disposed, [2, 3]);
   });
 
+  testWidgets(
+    'should release the bindings of a widget moved out of a scope '
+    'with a GlobalKey',
+    (tester) async {
+      final disposed = <int>[];
+      final current = ValueNotifier(1);
+      final countRef = Ref.scoped((ctx) => 0, dispose: disposed.add);
+      final child = Builder(
+        key: GlobalKey(),
+        builder: (context) => Text('got: ${countRef(context)}'),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LiteRefScope(
+            child: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return Column(
+                  children: [
+                    LiteRefScope(
+                      overrides: {
+                        countRef.overrideWith((_) => 1),
+                      },
+                      child: current.value == 1
+                          ? Builder(builder: (context) => child)
+                          : const SizedBox.shrink(),
+                    ),
+                    if (current.value == 2)
+                      Builder(builder: (context) => child),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('got: 1'), findsOneWidget);
+      expect(disposed, isEmpty);
+
+      current.value = 2;
+      await tester.pumpAndSettle();
+
+      expect(find.text('got: 0'), findsOneWidget);
+      // The inner scope is still mounted but lost its last consumer.
+      expect(disposed, [1]);
+    },
+  );
+
+  testWidgets('should recreate the instance when an override changes',
+      (tester) async {
+    final disposed = <int>[];
+    final current = ValueNotifier(0);
+    final countRef = Ref.scoped((ctx) => -1, dispose: disposed.add);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LiteRefScope(
+          child: ListenableBuilder(
+            listenable: current,
+            builder: (context, _) {
+              return LiteRefScope(
+                overrides: {
+                  countRef.overrideWith((_) => current.value),
+                },
+                child: Builder(
+                  builder: (context) => Text('${countRef(context)}'),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    expect(find.text('0'), findsOneWidget);
+    expect(disposed, isEmpty);
+
+    current.value = 1;
+    await tester.pumpAndSettle();
+
+    expect(find.text('1'), findsOneWidget);
+    expect(disposed, [0]);
+  });
+
+  testWidgets(
+    'should notify consumers of autoDispose=false refs '
+    'when the override changes',
+    (tester) async {
+      final current = ValueNotifier('a');
+      final nameRef = Ref.scoped((ctx) => 'none', autoDispose: false);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LiteRefScope(
+            child: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return LiteRefScope(
+                  overrides: {
+                    nameRef.overrideWith((_) => current.value),
+                  },
+                  child: Builder(
+                    builder: (context) => Text(nameRef(context)),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(find.text('a'), findsOneWidget);
+
+      current.value = 'b';
+      await tester.pumpAndSettle();
+
+      expect(find.text('b'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'should auto-dispose an override that enables autoDispose',
+    (tester) async {
+      final disposed = <int>[];
+      final show = ValueNotifier(true);
+      final countRef = Ref.scoped(
+        (ctx) => 0,
+        dispose: disposed.add,
+        autoDispose: false,
+      );
+      final override = countRef.overrideWith((_) => 1);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LiteRefScope(
+            child: Builder(
+              builder: (context) {
+                return LiteRefScope(
+                  overrides: {override},
+                  child: ListenableBuilder(
+                    listenable: show,
+                    builder: (context, _) => show.value
+                        ? Builder(
+                            builder: (context) => Text('${countRef(context)}'),
+                          )
+                        : const Text('hidden'),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(find.text('1'), findsOneWidget);
+      expect(disposed, isEmpty);
+
+      show.value = false;
+      await tester.pumpAndSettle();
+
+      expect(find.text('hidden'), findsOneWidget);
+      expect(disposed, [1]);
+    },
+  );
+
+  testWidgets(
+    'should not auto-dispose an override that disables autoDispose',
+    (tester) async {
+      final disposed = <int>[];
+      final show = ValueNotifier(true);
+      final countRef = Ref.scoped((ctx) => 0, dispose: disposed.add);
+      final override = countRef.overrideWith((_) => 1, autoDispose: false);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LiteRefScope(
+            child: Builder(
+              builder: (context) {
+                return LiteRefScope(
+                  overrides: {override},
+                  child: ListenableBuilder(
+                    listenable: show,
+                    builder: (context, _) => show.value
+                        ? Builder(
+                            builder: (context) => Text('${countRef(context)}'),
+                          )
+                        : const Text('hidden'),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(find.text('1'), findsOneWidget);
+
+      show.value = false;
+      await tester.pumpAndSettle();
+
+      expect(find.text('hidden'), findsOneWidget);
+      expect(disposed, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'should resolve from the new parent when a scope is moved '
+    'with a GlobalKey',
+    (tester) async {
+      final current = ValueNotifier(1);
+      final countRef = Ref.scoped((ctx) => 0);
+
+      final movedScope = LiteRefScope(
+        key: GlobalKey(),
+        onlyOverrides: true,
+        child: Builder(
+          builder: (context) => Text('got: ${countRef(context)}'),
+        ),
+      );
+
+      Widget slot(int value) {
+        return LiteRefScope(
+          overrides: {
+            countRef.overrideWith((_) => value),
+          },
+          child: movedScope,
+        );
+      }
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LiteRefScope(
+            child: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return Column(
+                  children: [
+                    if (current.value == 1)
+                      slot(1)
+                    else
+                      const SizedBox.shrink(),
+                    if (current.value == 2) slot(2),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('got: 1'), findsOneWidget);
+
+      current.value = 2;
+      await tester.pumpAndSettle();
+
+      expect(find.text('got: 2'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'should notify consumers when an onlyOverrides scope gains an override',
+    (tester) async {
+      final current = ValueNotifier(0);
+      final countRef = Ref.scoped((ctx) => 0);
+
+      // Kept as a constant instance so it only rebuilds when notified.
+      final consumer = Builder(
+        builder: (context) => Text('got: ${countRef(context)}'),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LiteRefScope(
+            overrides: {
+              countRef.overrideWith((_) => 1),
+            },
+            child: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return LiteRefScope(
+                  onlyOverrides: true,
+                  overrides: current.value == 0
+                      ? null
+                      : {countRef.overrideWith((_) => 2)},
+                  child: consumer,
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('got: 1'), findsOneWidget);
+
+      current.value = 1;
+      await tester.pumpAndSettle();
+
+      expect(find.text('got: 2'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'should recreate a family instance with a null family '
+    'when the override changes',
+    (tester) async {
+      final disposed = <int>[];
+      final current = ValueNotifier(0);
+      final countRef = Ref.scopedFamily<int, String?>(
+        (ctx, family) => -1,
+        dispose: disposed.add,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LiteRefScope(
+            child: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return LiteRefScope(
+                  overrides: {
+                    countRef.overrideWith((_, family) => current.value),
+                  },
+                  child: Builder(
+                    builder: (context) => Text('${countRef(context, null)}'),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(find.text('0'), findsOneWidget);
+
+      current.value = 1;
+      await tester.pumpAndSettle();
+
+      expect(find.text('1'), findsOneWidget);
+      expect(disposed, [0]);
+    },
+  );
+
+  testWidgets(
+    'should dispose the old instance when a mounted consumer switches '
+    'to an override added to an onlyOverrides scope',
+    (tester) async {
+      final disposed = <int>[];
+      final current = ValueNotifier(0);
+      final countRef = Ref.scoped((ctx) => -1, dispose: disposed.add);
+
+      // Kept as a constant instance so it only rebuilds when notified and
+      // stays mounted across the override change.
+      final consumer = Builder(
+        builder: (context) => Text('got: ${countRef(context)}'),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LiteRefScope(
+            overrides: {
+              countRef.overrideWith((_) => 1),
+            },
+            child: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return LiteRefScope(
+                  onlyOverrides: true,
+                  overrides: current.value == 0
+                      ? null
+                      : {countRef.overrideWith((_) => 2)},
+                  child: consumer,
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(find.text('got: 1'), findsOneWidget);
+      expect(disposed, isEmpty);
+
+      current.value = 1;
+      await tester.pumpAndSettle();
+
+      expect(find.text('got: 2'), findsOneWidget);
+      // The consumer never unmounted, yet its old instance is gone.
+      expect(disposed, [1]);
+
+      // Disposing the remaining instance on unmount must not repeat [1].
+      await tester.pumpWidget(const MaterialApp(home: Text('')));
+      await tester.pumpAndSettle();
+
+      expect(disposed, [1, 2]);
+    },
+  );
+
+  testWidgets('should re-resolve when onlyOverrides is toggled',
+      (tester) async {
+    final disposed = <int>[];
+    final current = ValueNotifier(false);
+    final countRef = Ref.scoped((ctx) => 0, dispose: disposed.add);
+
+    // Kept as a constant instance so it only rebuilds when notified.
+    final consumer = Builder(
+      builder: (context) => Text('got: ${countRef(context)}'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LiteRefScope(
+          overrides: {
+            countRef.overrideWith((_) => 1),
+          },
+          child: ListenableBuilder(
+            listenable: current,
+            builder: (context, _) {
+              return LiteRefScope(
+                onlyOverrides: current.value,
+                child: consumer,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    expect(find.text('got: 0'), findsOneWidget);
+    expect(disposed, isEmpty);
+
+    current.value = true;
+    await tester.pumpAndSettle();
+
+    // The inner scope no longer serves the ref, so the consumer must fall
+    // back to the parent override even though the overrides set is unchanged.
+    expect(find.text('got: 1'), findsOneWidget);
+    expect(disposed, [0]);
+  });
+
   group('ScopedFamilyRef', () {
+    testWidgets(
+      'should auto-dispose an override that enables autoDispose',
+      (tester) async {
+        final disposed = <int>[];
+        final show = ValueNotifier(true);
+        final countRef = Ref.scopedFamily(
+          (ctx, int f) => 0,
+          dispose: disposed.add,
+          autoDispose: false,
+        );
+        final override = countRef.overrideWith((_, __) => 1);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: Builder(
+                builder: (context) {
+                  return LiteRefScope(
+                    overrides: {override},
+                    child: ListenableBuilder(
+                      listenable: show,
+                      builder: (context, _) => show.value
+                          ? Builder(
+                              builder: (context) =>
+                                  Text('${countRef(context, 0)}'),
+                            )
+                          : const Text('hidden'),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        await tester.pumpAndSettle();
+
+        expect(find.text('1'), findsOneWidget);
+        expect(disposed, isEmpty);
+
+        show.value = false;
+        await tester.pumpAndSettle();
+
+        expect(find.text('hidden'), findsOneWidget);
+        expect(disposed, [1]);
+      },
+    );
+
     test('overridden instance should be equal to main', () {
       final countRef = Ref.scopedFamily((ctx, int a) => 1);
       final countRefClone = countRef.overrideWith((ctx, int a) => 2);
