@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:lite_ref_core/lite_ref_core.dart';
 import 'package:test/test.dart';
 
@@ -158,5 +160,84 @@ void main() {
     expect(instance == secondInstance, isTrue);
 
     expect(count, 2);
+  });
+
+  test('concurrent retries create a single instance', () async {
+    var count = 0;
+    final asyncRef = Ref.asyncSingleton<Point>(
+      () async {
+        count++;
+        await Future<void>.delayed(k10ms);
+        if (count == 1) throw Exception('Crashed $count');
+        return Point(count, count);
+      },
+    );
+
+    // Start the failing creation, then pile up waiters on its lock.
+    final first = asyncRef.instance;
+    final waiters = [asyncRef.instance, asyncRef.instance, asyncRef.instance];
+
+    await expectLater(first, throwsException);
+    final results = await Future.wait(waiters);
+
+    // Only one retry should have run even though three callers were waiting.
+    expect(count, 2);
+    expect(results.every((p) => identical(p, results.first)), isTrue);
+    expect(results.first.x, 2);
+  });
+
+  test('reading during override does not run the replacement factory twice',
+      () async {
+    final asyncRef = Ref.asyncSingleton<Point>(() async => Point(1, 2));
+    await asyncRef();
+
+    var count = 0;
+    final gate = Completer<void>();
+    final override = asyncRef.overrideWith(() async {
+      count++;
+      await gate.future;
+      return Point(3, 4);
+    });
+
+    // This read must wait on the override's creation, not start a new one.
+    final read = asyncRef.instance;
+
+    gate.complete();
+    await override;
+    final instance = await read;
+
+    expect(count, 1);
+    expect(instance.x, 3);
+  });
+
+  test('override during initial creation uses the replacement factory',
+      () async {
+    var oldCount = 0;
+    var newCount = 0;
+    final gate = Completer<void>();
+    final asyncRef = Ref.asyncSingleton<Point>(
+      () async {
+        oldCount++;
+        await gate.future;
+        return Point(1, 2);
+      },
+    );
+
+    final first = asyncRef.instance;
+    final override = asyncRef.overrideWith(() async {
+      newCount++;
+      return Point(3, 4);
+    });
+
+    gate.complete();
+    await override;
+    await first;
+
+    final instance = await asyncRef.instance;
+
+    // The original result must be discarded in favour of the replacement.
+    expect(oldCount, 1);
+    expect(newCount, 1);
+    expect(instance.x, 3);
   });
 }
