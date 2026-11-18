@@ -1,3 +1,13 @@
+## 0.8.3
+
+Patch release that picks up the `lite_ref_core` 0.1.2 concurrency fixes for
+`AsyncSingletonRef`. There are no public API changes.
+
+-   [Fix] Updated `lite_ref_core` to `^0.1.2`, which fixes concurrent retries
+    creating multiple singletons, a concurrent `instance` read running the
+    replacement factory twice during `overrideWith`, and an override during
+    initial creation leaving the original instance cached.
+
 ## 0.8.2
 
 Patch release with lifecycle fixes for `LiteRefScope`. There are no public API
