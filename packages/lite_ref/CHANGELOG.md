@@ -1,4 +1,4 @@
-## 0.8.1
+## 0.8.2
 
 Patch release with lifecycle fixes for `LiteRefScope`. There are no public API
 changes.
@@ -21,6 +21,10 @@ changes.
     have no consumers. This can happen earlier than before, so code that keeps
     a reference to a scoped instance in a callback or a long-lived object must
     not use it after the scope changes.
+
+## 0.8.1
+
+-   [Fix] Fixed bug with disposal of widget state.
 
 ## 0.8.0
 
