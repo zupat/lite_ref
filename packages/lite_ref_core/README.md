@@ -1,10 +1,10 @@
 <p align="center">
-  <img width="500" src="https://github.com/jinyus/lite_ref/blob/main/assets/lite_ref_banner.jpg?raw=true">
+  <img width="500" src="https://github.com/zupat/lite_ref/blob/main/assets/lite_ref_banner.jpg?raw=true">
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-purple"> 
-  <a href="https://app.codecov.io/github/jinyus/lite_ref"><img src="https://img.shields.io/codecov/c/github/jinyus/lite_ref"></a>
+  <a href="https://app.codecov.io/github/zupat/lite_ref"><img src="https://img.shields.io/codecov/c/github/zupat/lite_ref"></a>
   <a href="https://pub.dev/packages/lite_ref"><img src="https://img.shields.io/pub/points/lite_ref?color=blue"></a>
 </p>
 
@@ -79,4 +79,4 @@ dart pub add lite_ref
         final db = dbRef.assertInstance;
         ```
 
-### Click [here](https://github.com/jinyus/lite_ref/tree/main/example/flutter_example) for a flutter example with testing.
+### Click [here](https://github.com/zupat/lite_ref/tree/main/example/flutter_example) for a flutter example with testing.

@@ -1,4 +1,4 @@
-source code with tests: [examples/counter/lib/main.dart](https://github.com/jinyus/lite_ref/blob/main/examples/counter/lib/main.dart)
+source code with tests: [examples/counter/lib/main.dart](https://github.com/zupat/lite_ref/blob/main/examples/counter/lib/main.dart)
 
 ```dart
 import 'package:flutter/material.dart';
