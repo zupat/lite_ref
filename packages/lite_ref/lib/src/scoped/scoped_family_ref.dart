@@ -51,7 +51,7 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
   ScopedObject<T> _createRefObject(_RefScopeElement owner, F family) {
     return _createScopedObject<T>(
       owner,
-      id: (_id, family),
+      id: _cacheKey(family),
       create: () => _create(owner, family),
       ownership: _ownership,
     );

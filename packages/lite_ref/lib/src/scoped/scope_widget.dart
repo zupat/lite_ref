@@ -162,13 +162,6 @@ class _RefScopeElement extends InheritedElement {
   /// Objects whose factories resolved a ref ID through this scope.
   late final _lookupDependents = <Object, Set<_Dependent>>{};
 
-  /// Factories currently running for objects owned by this scope.
-  ///
-  /// The owning element is also the creation context handed to factories, so
-  /// a lookup made from a factory can discover its pending object without
-  /// library-global state.
-  late final _creatingStack = <_PendingScopedObject<dynamic>>[];
-
   _RefScopeElement? _deactivatedParent;
 
   bool _disposalScheduled = false;
@@ -461,7 +454,16 @@ class _RefScopeElement extends InheritedElement {
     // it would otherwise keep its bindings in the old scope forever.
     final refs = _autoDisposeBindings.remove(dependent);
     _listeningElements.remove(dependent);
-    _consumerBindings[dependent] = null;
+
+    // Only this scope's bindings are stale. Bindings held by other scopes for
+    // the same element must survive so a later scope switch can release them.
+    final bindings = _consumerBindings[dependent];
+    if (bindings != null) {
+      bindings.removeWhere((_, scope) => identical(scope, this));
+      if (bindings.isEmpty) {
+        _consumerBindings[dependent] = null;
+      }
+    }
 
     if (refs != null) {
       for (final ref in refs) {
@@ -506,7 +508,6 @@ class _RefScopeElement extends InheritedElement {
       _autoDisposeBindings.clear();
       _listeningElements.clear();
       _lookupDependents.clear();
-      _creatingStack.clear();
       _deactivatedParent = null;
       super.unmount();
     }

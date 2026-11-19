@@ -21,7 +21,7 @@ T _resolveScoped<T>({
 }) {
   final traversedScopes = <_RefScopeElement>[];
   final element = LiteRefScope._of(context, ref, traversed: traversedScopes);
-  final creating = _creationContext(context);
+  final creating = _creationContext();
 
   final existing = element._cache[cacheKey];
 
@@ -60,10 +60,15 @@ T _resolveScoped<T>({
   return object._instance;
 }
 
-/// The factory that is running when [context] is its creation context.
-_PendingScopedObject<dynamic>? _creationContext(BuildContext context) {
-  if (context is! _RefScopeElement) return null;
-
-  final stack = context._creatingStack;
-  return stack.isEmpty ? null : stack.last;
+/// The factory currently running on this synchronous call stack, if any.
+///
+/// A factory may resolve dependencies through any [BuildContext] it captured,
+/// not only the `ctx` parameter, so the creation context follows the call
+/// stack instead of a particular scope element.
+_PendingScopedObject<dynamic>? _creationContext() {
+  final creating = Zone.current[_creatingZoneKey];
+  if (creating is _PendingScopedObject<dynamic> && creating._active) {
+    return creating;
+  }
+  return null;
 }

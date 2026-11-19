@@ -97,6 +97,125 @@ void main() {
   });
 
   testWidgets(
+    'a factory lookup through a captured context records a dependency',
+    (tester) async {
+      final disposed = <int>[];
+      final show = ValueNotifier(true);
+      late BuildContext captured;
+      final sourceRef = Ref.scoped((_) => 1, dispose: disposed.add);
+      final dependentRef = Ref.scoped<int>((_) => sourceRef(captured));
+
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: LiteRefScope(
+            child: Builder(
+              builder: (context) {
+                captured = context;
+                return ListenableBuilder(
+                  listenable: show,
+                  builder: (context, _) {
+                    if (!show.value) return const Text('hidden');
+                    return Builder(
+                      builder: (context) {
+                        dependentRef(context);
+                        return const Text('visible');
+                      },
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('visible'), findsOneWidget);
+
+      show.value = false;
+      await tester.pumpAndSettle();
+
+      expect(find.text('hidden'), findsOneWidget);
+      // The factory resolved its dependency through a different context, so
+      // it must still be released with the dependent object.
+      expect(disposed, [1]);
+    },
+  );
+
+  testWidgets(
+    'removing a dependent from one scope keeps other scope bindings',
+    (tester) async {
+      final disposed = <int>[];
+      final aRef = Ref.scoped((_) => 0, dispose: disposed.add);
+      final bRef = Ref.scoped((_) => 0, dispose: disposed.add);
+      final current = ValueNotifier(false);
+      final rebuild = ValueNotifier(0);
+      final innerKey = GlobalKey();
+      final consumerKey = GlobalKey();
+
+      final aRootOverride = aRef.overrideWith((_) => 1);
+      final aInnerOverride = aRef.overrideWith((_) => 2);
+      final bInnerOverride = bRef.overrideWith((_) => 10);
+
+      final consumer = ListenableBuilder(
+        key: consumerKey,
+        listenable: rebuild,
+        builder: (context, _) {
+          return Column(
+            children: [
+              Text('a ${aRef(context)}'),
+              Text('b ${bRef(context)}'),
+            ],
+          );
+        },
+      );
+
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: LiteRefScope(
+            overrides: {aRootOverride},
+            child: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return LiteRefScope(
+                  key: innerKey,
+                  onlyOverrides: true,
+                  overrides: {
+                    bInnerOverride,
+                    if (current.value) aInnerOverride,
+                  },
+                  child: consumer,
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('a 1'), findsOneWidget);
+      expect(find.text('b 10'), findsOneWidget);
+
+      final innerElement =
+          tester.element(find.byKey(innerKey)) as InheritedElement;
+      final consumerElement = tester.element(find.byKey(consumerKey));
+      // Simulate one scope losing the dependent while another keeps it. The
+      // framework normally does this while deactivating a subtree.
+      // ignore: invalid_use_of_protected_member
+      innerElement.removeDependent(consumerElement);
+
+      current.value = true;
+      rebuild.value++;
+      await tester.pumpAndSettle();
+
+      expect(find.text('a 2'), findsOneWidget);
+      // Only the inner scope lost the dependent; the outer binding must still
+      // be known so switching to the inner override releases it.
+      expect(disposed, [1]);
+    },
+  );
+
+  testWidgets(
     'a failed factory releases the dependencies it acquired',
     (tester) async {
       final resource = _Resource();

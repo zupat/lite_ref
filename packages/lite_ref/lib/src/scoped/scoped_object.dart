@@ -1,5 +1,11 @@
 part of 'scoped.dart';
 
+/// Zone key for the factory that is currently running.
+///
+/// A zone value follows the synchronous factory call stack, unlike the old
+/// library-global list, so it cannot leak into other scopes or tests.
+final _creatingZoneKey = Object();
+
 /// Who is responsible for disposing a scoped value.
 ///
 /// Only the two scope-owned variants carry disposal behavior, so a
@@ -12,6 +18,10 @@ sealed class _Ownership<T> {
 }
 
 /// The caller owns the value. The scope only releases its dependencies.
+///
+/// [autoDispose] exists only to preserve the lifetime reported by
+/// `ScopedObject(owned: false)`, whose public constructor keeps the parameter.
+/// A caller-owned value is never disposed by a scope.
 final class _CallerOwned<T> extends _Ownership<T> {
   const _CallerOwned({this.autoDispose = false});
 
@@ -132,6 +142,8 @@ class ScopedObject<T> extends _Dependent {
 
   final Object _id;
 
+  /// Stays `late` because the public constructor leaves it uninitialized: an
+  /// object created that way can never participate in a scope.
   late final _RefScopeElement _owner;
 
   final _Ownership<T> _ownership;
@@ -191,11 +203,19 @@ final class _PendingScopedObject<T> extends _Dependent {
 
   final _Ownership<T> ownership;
 
+  /// Whether the factory is still running.
+  ///
+  /// Read from the creation zone so asynchronous work started by a factory
+  /// cannot register new dependencies after creation completed.
+  bool _active = true;
+
   /// Turns this in-progress creation into a cached object.
   ///
   /// A pending object is only ever a dependent, never a dependency: it is not
   /// in any scope cache, so moving its back-pointers is one-directional.
   ScopedObject<T> complete(T instance) {
+    _active = false;
+
     final object = ScopedObject<T>._(
       id: id,
       instance: instance,
@@ -235,6 +255,7 @@ final class _PendingScopedObject<T> extends _Dependent {
 
   /// Releases everything the failed factory acquired.
   void abandon() {
+    _active = false;
     _releaseDependencies();
   }
 }
@@ -251,21 +272,19 @@ ScopedObject<T> _createScopedObject<T>(
     ownership: ownership,
   );
 
-  owner._creatingStack.add(pending);
-
-  try {
-    // Only a completed entry enters the cache, including one whose value is
-    // legitimately `null`.
-    return pending.complete(create());
-  } catch (_) {
-    // Dependencies acquired before a factory failed still retain their refs.
-    pending.abandon();
-    rethrow;
-  } finally {
-    assert(
-      identical(owner._creatingStack.last, pending),
-      'Factories must complete in the order they started.',
-    );
-    owner._creatingStack.removeLast();
-  }
+  return runZoned(
+    () {
+      try {
+        // Only a completed entry enters the cache, including one whose value
+        // is legitimately `null`.
+        return pending.complete(create());
+      } catch (_) {
+        // Dependencies acquired before a factory failed still retain their
+        // refs.
+        pending.abandon();
+        rethrow;
+      }
+    },
+    zoneValues: {_creatingZoneKey: pending},
+  );
 }
