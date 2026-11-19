@@ -160,7 +160,7 @@ class _RefScopeElement extends InheritedElement {
   late final _evictedRefs = <ScopedObject<dynamic>>[];
 
   /// Objects whose factories resolved a ref ID through this scope.
-  late final _lookupDependents = <Object, Set<ScopedObject<dynamic>>>{};
+  late final _lookupDependents = <Object, Set<_Dependent>>{};
 
   _RefScopeElement? _deactivatedParent;
 
@@ -177,7 +177,7 @@ class _RefScopeElement extends InheritedElement {
   }
 
   void _addObjectDependency(
-    ScopedObject<dynamic> dependent,
+    _Dependent dependent,
     ScopedObject<dynamic> dependency,
   ) {
     if (!dependent._dependencies.add(dependency)) return;
@@ -187,7 +187,7 @@ class _RefScopeElement extends InheritedElement {
   }
 
   void _addLookupDependency(
-    ScopedObject<dynamic> dependent,
+    _Dependent dependent,
     Object id,
   ) {
     _lookupDependents.putIfAbsent(id, () => {}).add(dependent);
@@ -389,10 +389,17 @@ class _RefScopeElement extends InheritedElement {
     // A changed lookup path also invalidates dependents even when the previous
     // dependency was cached in an ancestor rather than in this scope.
     for (final id in changedIds) {
-      roots.addAll(_lookupDependents[id] ?? const {});
+      final dependents = _lookupDependents[id];
+      if (dependents != null) {
+        roots.addAll(dependents.whereType<ScopedObject<dynamic>>());
+      }
     }
     if (onlyOverridesChanged) {
-      roots.addAll(_lookupDependents.values.expand((refs) => refs));
+      roots.addAll(
+        _lookupDependents.values
+            .expand((refs) => refs)
+            .whereType<ScopedObject<dynamic>>(),
+      );
     }
 
     final affectedScopes = _evictWithDependents(roots);
@@ -410,7 +417,8 @@ class _RefScopeElement extends InheritedElement {
 
     void collect(ScopedObject<dynamic> ref) {
       if (!visited.add(ref)) return;
-      for (final dependent in List.of(ref._dependents)) {
+      for (final dependent
+          in ref._dependents.whereType<ScopedObject<dynamic>>()) {
         collect(dependent);
       }
       evicted.add(ref);
