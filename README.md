@@ -75,6 +75,17 @@ A `ScopedRef` is a reference that needs a build context to access its instance. 
     ),
     ```
 
+-   Use `overrideWithValue` for an existing instance owned elsewhere. The scope will not dispose it:
+
+    ```dart
+    LiteRefScope(
+      overrides: {
+        settingsServiceRef.overrideWithValue(existingSettingsService),
+      },
+      child: MyApp(),
+    ),
+    ```
+
 A `ScopedFamilyRef` is used when you need to create a unique instance for different keys.
 This is useful for creating multiple instances of the same class with different configurations.
 

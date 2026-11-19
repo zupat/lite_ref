@@ -13,6 +13,9 @@ import 'package:lite_ref_core/lite_ref_core.dart';
 abstract class Ref {
   /// Creates a new [ScopedRef] which requires a context to access the instance.
   ///
+  /// See [ScopedRef] for creation-context, auto-dispose, and ownership
+  /// semantics, including [ScopedRef.overrideWithValue].
+  ///
   ///  -   Wrap your app or a subtree with a `LiteRefScope`:
   ///
   ///      ```dart
@@ -69,6 +72,9 @@ abstract class Ref {
   /// Creates a new [ScopedFamilyRef] which requires a context and family value
   /// to access the instance.
   /// The family value must be immutable and implement `==` and `hashCode`.
+  ///
+  /// See [ScopedFamilyRef] for creation-context, family-key lifetime,
+  /// auto-dispose, and ownership semantics.
   ///
   ///  -   Wrap your app or a subtree with a `LiteRefScope`:
   ///

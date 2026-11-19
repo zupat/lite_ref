@@ -1455,15 +1455,877 @@ void main() {
       // opts out of auto-disposal.
       expect(disposed, [0]);
 
-      // The replacement is not auto-disposed with the scope.
+      // Disabling auto-disposal only keeps it alive with zero listeners. The
+      // scope still owns the override and disposes it on unmount.
       await tester.pumpWidget(const MaterialApp(home: Text('')));
       await tester.pumpAndSettle();
 
-      expect(disposed, [0]);
+      expect(disposed, [0, 1]);
     },
   );
 
+  group('scoped lifecycle regressions', () {
+    testWidgets(
+      'dependencies use the owning scope and outlive the first consumer',
+      (tester) async {
+        final rootResource = _Resource();
+        final childResource = _Resource();
+        final resourceRef = Ref.scoped((_) => rootResource);
+        final dependentRef = Ref.scoped(
+          (ctx) => _Dependent(resourceRef(ctx)),
+        );
+        final showChild = ValueNotifier(true);
+        late _Dependent firstRequest;
+        late _Dependent siblingRequest;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: Column(
+                children: [
+                  ListenableBuilder(
+                    listenable: showChild,
+                    builder: (context, _) {
+                      if (!showChild.value) return const SizedBox.shrink();
+                      return LiteRefScope(
+                        onlyOverrides: true,
+                        overrides: {
+                          resourceRef.overrideWithValue(childResource),
+                        },
+                        child: Builder(
+                          builder: (context) {
+                            firstRequest = dependentRef(context);
+                            return const Text('child');
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                  Builder(
+                    builder: (context) {
+                      siblingRequest = dependentRef(context);
+                      return const Text('sibling');
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        expect(identical(firstRequest, siblingRequest), isTrue);
+        expect(identical(siblingRequest.resource, rootResource), isTrue);
+        expect(identical(siblingRequest.resource, childResource), isFalse);
+
+        showChild.value = false;
+        await tester.pumpAndSettle();
+
+        expect(rootResource.disposed, isFalse);
+        expect(identical(siblingRequest.resource, rootResource), isTrue);
+
+        await tester.pumpWidget(const MaterialApp(home: Text('')));
+        await tester.pumpAndSettle();
+
+        expect(rootResource.disposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'create receives the owning scope context for inherited lookups',
+      (tester) async {
+        late Brightness factoryBrightness;
+        final brightnessRef = Ref.scoped((ctx) {
+          return factoryBrightness = Theme.of(ctx).brightness;
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(brightness: Brightness.light),
+            home: LiteRefScope(
+              child: Theme(
+                data: ThemeData(brightness: Brightness.dark),
+                child: Builder(
+                  builder: (context) => Text('${brightnessRef(context)}'),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        expect(factoryBrightness, Brightness.light);
+        expect(find.text('Brightness.light'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'replacing a dependency rebuilds dependents before disposing them',
+      (tester) async {
+        final current = ValueNotifier(0);
+        final first = _Resource();
+        final second = _Resource();
+        final disposedDependents = <_Resource>[];
+        final resourceRef = Ref.scoped<_Resource>(
+          (_) => throw StateError('An override is required'),
+        );
+        final dependentRef = Ref.scopedFamily<_Dependent, int>(
+          (ctx, _) => _Dependent(resourceRef(ctx)),
+          dispose: (dependent) {
+            expect(dependent.resource.disposed, isFalse);
+            disposedDependents.add(dependent.resource);
+          },
+        );
+        late _Dependent visibleDependent;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return LiteRefScope(
+                  overrides: {
+                    resourceRef.overrideWith(
+                      (_) => current.value == 0 ? first : second,
+                    ),
+                  },
+                  child: Builder(
+                    builder: (context) {
+                      visibleDependent = dependentRef(context, 42);
+                      return Text('${identityHashCode(visibleDependent)}');
+                    },
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+
+        final initialDependent = visibleDependent;
+        expect(identical(initialDependent.resource, first), isTrue);
+
+        current.value = 1;
+        await tester.pumpAndSettle();
+
+        expect(identical(visibleDependent, initialDependent), isFalse);
+        expect(identical(visibleDependent.resource, second), isTrue);
+        expect(disposedDependents, [first]);
+        expect(first.disposed, isTrue);
+        expect(second.disposed, isFalse);
+      },
+    );
+
+    testWidgets(
+      'a throwing factory releases dependencies it already acquired',
+      (tester) async {
+        final resource = _Resource();
+        final resourceRef = Ref.scoped((_) => resource);
+        final throwingRef = Ref.scoped<int>((ctx) {
+          resourceRef(ctx);
+          throw StateError('factory failed');
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: Builder(
+                builder: (context) {
+                  expect(() => throwingRef(context), throwsStateError);
+                  return const SizedBox.shrink();
+                },
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(resource.disposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'autoDispose false values are disposed when their scope unmounts',
+      (tester) async {
+        final resource = _Resource();
+        final notifier = ValueNotifier(0);
+        final resourceRef = Ref.scoped(
+          (_) => resource,
+          autoDispose: false,
+        );
+        final notifierRef = Ref.scoped(
+          (_) => notifier,
+          autoDispose: false,
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: Builder(
+                builder: (context) {
+                  resourceRef(context);
+                  notifierRef(context);
+                  return const SizedBox.shrink();
+                },
+              ),
+            ),
+          ),
+        );
+
+        await tester.pumpWidget(const MaterialApp(home: Text('')));
+        await tester.pumpAndSettle();
+
+        expect(resource.disposed, isTrue);
+        expect(() => notifier.addListener(() {}), throwsFlutterError);
+      },
+    );
+
+    testWidgets(
+      'autoDispose false overrides are disposed when replaced',
+      (tester) async {
+        final current = ValueNotifier(0);
+        final first = _Resource();
+        final second = _Resource();
+        final resourceRef = Ref.scoped<_Resource>(
+          (_) => throw StateError('An override is required'),
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return LiteRefScope(
+                  overrides: {
+                    resourceRef.overrideWith(
+                      (_) => current.value == 0 ? first : second,
+                      autoDispose: false,
+                    ),
+                  },
+                  child: Builder(
+                    builder: (context) {
+                      resourceRef(context);
+                      return const SizedBox.shrink();
+                    },
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+
+        current.value = 1;
+        await tester.pumpAndSettle();
+
+        expect(first.disposed, isTrue);
+        expect(second.disposed, isFalse);
+
+        await tester.pumpWidget(const MaterialApp(home: Text('')));
+        await tester.pumpAndSettle();
+
+        expect(second.disposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'overrideWithValue leaves disposal to the external owner',
+      (tester) async {
+        final current = ValueNotifier(0);
+        final first = _Resource();
+        final second = _Resource();
+        final familyResource = _Resource();
+        final resourceRef = Ref.scoped<_Resource>(
+          (_) => throw StateError('An override is required'),
+        );
+        final familyRef = Ref.scopedFamily<_Resource, int>(
+          (_, __) => throw StateError('An override is required'),
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return LiteRefScope(
+                  overrides: {
+                    resourceRef.overrideWithValue(
+                      current.value == 0 ? first : second,
+                    ),
+                    familyRef.overrideWithValue(familyResource),
+                  },
+                  child: Builder(
+                    builder: (context) {
+                      resourceRef(context);
+                      familyRef(context, 1);
+                      return const SizedBox.shrink();
+                    },
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+
+        current.value = 1;
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(const MaterialApp(home: Text('')));
+        await tester.pumpAndSettle();
+
+        expect(first.disposed, isFalse);
+        expect(second.disposed, isFalse);
+        expect(familyResource.disposed, isFalse);
+
+        first.dispose();
+        second.dispose();
+        familyResource.dispose();
+      },
+    );
+
+    testWidgets(
+      'onlyOverrides evicts local values without recreating overrides',
+      (tester) async {
+        final current = ValueNotifier(false);
+        final disposed = <int>[];
+        var localCreations = 0;
+        var overrideCreations = 0;
+        final localRef = Ref.scoped(
+          (_) => ++localCreations,
+          dispose: disposed.add,
+        );
+        final retainedRef = Ref.scoped((_) => 0);
+        final retainedOverride = retainedRef.overrideWith(
+          (_) => ++overrideCreations,
+        );
+        final consumer = Builder(
+          builder: (context) {
+            return Text('${localRef(context)}:${retainedRef(context)}');
+          },
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              overrides: {localRef.overrideWithValue(-1)},
+              child: ListenableBuilder(
+                listenable: current,
+                builder: (context, _) {
+                  return LiteRefScope(
+                    onlyOverrides: current.value,
+                    overrides: {retainedOverride},
+                    child: consumer,
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        expect(find.text('1:1'), findsOneWidget);
+        expect(localCreations, 1);
+        expect(overrideCreations, 1);
+
+        current.value = true;
+        await tester.pumpAndSettle();
+
+        expect(find.text('-1:1'), findsOneWidget);
+        expect(disposed, [1]);
+        expect(overrideCreations, 1);
+
+        current.value = false;
+        await tester.pumpAndSettle();
+
+        expect(find.text('2:1'), findsOneWidget);
+        expect(localCreations, 2);
+        expect(overrideCreations, 1);
+      },
+    );
+
+    testWidgets(
+      'onlyOverrides evicts every non-overridden family key',
+      (tester) async {
+        final current = ValueNotifier(false);
+        final disposed = <int>[];
+        final creations = <int, int>{};
+        final familyRef = Ref.scopedFamily<int, int>(
+          (_, family) {
+            final creation = creations.update(
+              family,
+              (value) => value + 1,
+              ifAbsent: () => 1,
+            );
+            return family * 10 + creation;
+          },
+          dispose: disposed.add,
+        );
+        final consumer = Builder(
+          builder: (context) {
+            return Column(
+              children: [
+                Text('${familyRef(context, 1)}'),
+                Text('${familyRef(context, 2)}'),
+              ],
+            );
+          },
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              overrides: {
+                familyRef.overrideWith((_, family) => -family),
+              },
+              child: ListenableBuilder(
+                listenable: current,
+                builder: (context, _) {
+                  return LiteRefScope(
+                    onlyOverrides: current.value,
+                    child: consumer,
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        expect(find.text('11'), findsOneWidget);
+        expect(find.text('21'), findsOneWidget);
+
+        current.value = true;
+        await tester.pumpAndSettle();
+
+        expect(find.text('-1'), findsOneWidget);
+        expect(find.text('-2'), findsOneWidget);
+        expect(disposed, [11, 21]);
+
+        current.value = false;
+        await tester.pumpAndSettle();
+
+        expect(find.text('12'), findsOneWidget);
+        expect(find.text('22'), findsOneWidget);
+        expect(creations, {1: 2, 2: 2});
+      },
+    );
+
+    testWidgets(
+      'one throwing disposer does not abort the post-frame flush',
+      (tester) async {
+        final previousOnError = FlutterError.onError;
+        final errors = <FlutterErrorDetails>[];
+        FlutterError.onError = errors.add;
+        addTearDown(() => FlutterError.onError = previousOnError);
+        final show = ValueNotifier(true);
+        final disposed = <int>[];
+        final firstRef = Ref.scoped(
+          (_) => 1,
+          dispose: (value) {
+            disposed.add(value);
+            throw StateError('first dispose failed');
+          },
+        );
+        final secondRef = Ref.scoped(
+          (_) => 2,
+          dispose: disposed.add,
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: ListenableBuilder(
+                listenable: show,
+                builder: (context, _) {
+                  if (!show.value) return const SizedBox.shrink();
+                  return Builder(
+                    builder: (context) {
+                      firstRef(context);
+                      secondRef(context);
+                      return const SizedBox.shrink();
+                    },
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        show.value = false;
+        await tester.pumpAndSettle();
+
+        expect(disposed, [1, 2]);
+        expect(errors, hasLength(1));
+        expect(errors.single.exception, isStateError);
+      },
+    );
+
+    testWidgets(
+      'one throwing disposer does not abort scope unmount',
+      (tester) async {
+        final previousOnError = FlutterError.onError;
+        final errors = <FlutterErrorDetails>[];
+        FlutterError.onError = errors.add;
+        addTearDown(() => FlutterError.onError = previousOnError);
+        final disposed = <int>[];
+        final firstRef = Ref.scoped(
+          (_) => 1,
+          dispose: (value) {
+            disposed.add(value);
+            throw StateError('first dispose failed');
+          },
+        );
+        final secondRef = Ref.scoped(
+          (_) => 2,
+          dispose: disposed.add,
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: Builder(
+                builder: (context) {
+                  firstRef(context);
+                  secondRef(context);
+                  return const SizedBox.shrink();
+                },
+              ),
+            ),
+          ),
+        );
+
+        await tester.pumpWidget(const MaterialApp(home: Text('')));
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(const SizedBox.shrink());
+
+        expect(disposed, [1, 2]);
+        expect(errors, hasLength(1));
+        expect(errors.single.exception, isStateError);
+      },
+    );
+
+    testWidgets(
+      'dependencies released during a flush are disposed in the same cleanup',
+      (tester) async {
+        final dependency = _Resource();
+        final dependencyRef = Ref.scoped((_) => dependency);
+        final dependentRef = Ref.scoped(
+          (ctx) => _Dependent(dependencyRef(ctx)),
+        );
+        final show = ValueNotifier(true);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: ListenableBuilder(
+                listenable: show,
+                builder: (context, _) {
+                  if (!show.value) return const Text('hidden');
+                  return Builder(
+                    builder: (context) {
+                      dependentRef(context);
+                      return const Text('visible');
+                    },
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        show.value = false;
+        await tester.pumpAndSettle();
+
+        expect(dependency.disposed, isTrue);
+        expect(find.text('hidden'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'a dependency released by another scope schedules its disposal frame',
+      (tester) async {
+        final dependency = _Resource();
+        final dependencyRef = Ref.scoped((_) => dependency);
+        final dependentRef = Ref.scoped<_Dependent>(
+          (_) => throw StateError('An override is required'),
+        );
+        final dependentOverride = dependentRef.overrideWith(
+          (ctx) => _Dependent(dependencyRef(ctx)),
+        );
+
+        Widget tree({required bool listen}) {
+          return MaterialApp(
+            home: LiteRefScope(
+              child: LiteRefScope(
+                onlyOverrides: true,
+                overrides: {dependentOverride},
+                child: listen
+                    ? Builder(
+                        builder: (context) {
+                          dependentRef(context);
+                          return const SizedBox.shrink();
+                        },
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ),
+          );
+        }
+
+        await tester.pumpWidget(tree(listen: true));
+        await tester.pumpWidget(tree(listen: false));
+
+        // The child scope releases the parent-owned dependency inside this
+        // frame's post-frame callback. Its cleanup must schedule a new frame.
+        expect(dependency.disposed, isFalse);
+        expect(tester.binding.hasScheduledFrame, isTrue);
+
+        await tester.pump();
+
+        expect(dependency.disposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'adding an override invalidates dependents resolved through that scope',
+      (tester) async {
+        final current = ValueNotifier(false);
+        final dependencyRef = Ref.scoped((_) => 0);
+        final dependentRef = Ref.scoped<int>(
+          (_) => throw StateError('An override is required'),
+        );
+        final dependentOverride = dependentRef.overrideWith(
+          dependencyRef.call,
+        );
+        final consumer = Builder(
+          builder: (context) => Text('${dependentRef(context)}'),
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              overrides: {dependencyRef.overrideWith((_) => 1)},
+              child: ListenableBuilder(
+                listenable: current,
+                builder: (context, _) {
+                  return LiteRefScope(
+                    onlyOverrides: true,
+                    overrides: {
+                      dependentOverride,
+                      if (current.value) dependencyRef.overrideWith((_) => 2),
+                    },
+                    child: consumer,
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        expect(find.text('1'), findsOneWidget);
+
+        current.value = true;
+        await tester.pumpAndSettle();
+
+        expect(find.text('2'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'disabling onlyOverrides invalidates parent-resolved dependents',
+      (tester) async {
+        final current = ValueNotifier(true);
+        final dependencyRef = Ref.scoped((_) => 3);
+        final dependentRef = Ref.scoped<int>(
+          (_) => throw StateError('An override is required'),
+        );
+        final dependentOverride = dependentRef.overrideWith(
+          dependencyRef.call,
+        );
+        final consumer = Builder(
+          builder: (context) => Text('${dependentRef(context)}'),
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              overrides: {dependencyRef.overrideWith((_) => 1)},
+              child: ListenableBuilder(
+                listenable: current,
+                builder: (context, _) {
+                  return LiteRefScope(
+                    onlyOverrides: current.value,
+                    overrides: {dependentOverride},
+                    child: consumer,
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        expect(find.text('1'), findsOneWidget);
+
+        current.value = false;
+        await tester.pumpAndSettle();
+
+        expect(find.text('3'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'moving a keyed scope rebuilds dependencies from its new parent',
+      (tester) async {
+        final current = ValueNotifier(1);
+        final first = _Resource();
+        final second = _Resource();
+        final resourceRef = Ref.scoped<_Resource>(
+          (_) => throw StateError('A parent override is required'),
+        );
+        final dependentRef = Ref.scoped<_Dependent>(
+          (_) => throw StateError('An override is required'),
+        );
+        final dependentOverride = dependentRef.overrideWith(
+          (ctx) => _Dependent(resourceRef(ctx)),
+          autoDispose: true,
+        );
+        final movedScope = LiteRefScope(
+          key: GlobalKey(),
+          onlyOverrides: true,
+          overrides: {dependentOverride},
+          child: Builder(
+            builder: (context) {
+              final dependent = dependentRef(context);
+              return Text('${identityHashCode(dependent.resource)}');
+            },
+          ),
+        );
+
+        Widget slot(_Resource resource) {
+          return LiteRefScope(
+            overrides: {resourceRef.overrideWith((_) => resource)},
+            child: movedScope,
+          );
+        }
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: ListenableBuilder(
+                listenable: current,
+                builder: (context, _) {
+                  return Column(
+                    children: [
+                      if (current.value == 1) slot(first),
+                      if (current.value == 2) slot(second),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        final initialValue = identityHashCode(first);
+        expect(find.text('$initialValue'), findsOneWidget);
+
+        current.value = 2;
+        await tester.pumpAndSettle();
+
+        expect(find.text('${identityHashCode(second)}'), findsOneWidget);
+        expect(first.disposed, isTrue);
+        expect(second.disposed, isFalse);
+      },
+    );
+
+    testWidgets(
+      'explicit disposers receive null exactly once',
+      (tester) async {
+        final disposed = <int?>[];
+        final nullableRef = Ref.scoped<int?>(
+          (_) => null,
+          dispose: disposed.add,
+        );
+        final show = ValueNotifier(true);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: ListenableBuilder(
+                listenable: show,
+                builder: (context, _) {
+                  if (!show.value) return const SizedBox.shrink();
+                  return Builder(
+                    builder: (context) {
+                      nullableRef(context);
+                      return const SizedBox.shrink();
+                    },
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        show.value = false;
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(const MaterialApp(home: Text('')));
+        await tester.pumpAndSettle();
+
+        expect(disposed, [null]);
+      },
+    );
+  });
+
   group('ScopedFamilyRef', () {
+    testWidgets(
+      'retains earlier keys until the consumer unmounts',
+      (tester) async {
+        final current = ValueNotifier(1);
+        final show = ValueNotifier(true);
+        final disposed = <int>[];
+        final familyRef = Ref.scopedFamily<int, int>(
+          (_, family) => family,
+          dispose: disposed.add,
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: ListenableBuilder(
+                listenable: show,
+                builder: (context, _) {
+                  if (!show.value) return const Text('hidden');
+                  return ListenableBuilder(
+                    listenable: current,
+                    builder: (context, _) {
+                      return Builder(
+                        builder: (context) {
+                          return Text('${familyRef(context, current.value)}');
+                        },
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        expect(find.text('1'), findsOneWidget);
+
+        current.value = 2;
+        await tester.pumpAndSettle();
+        expect(find.text('2'), findsOneWidget);
+
+        current.value = 3;
+        await tester.pumpAndSettle();
+        expect(find.text('3'), findsOneWidget);
+
+        // Earlier keys remain retained while this consumer is mounted.
+        expect(disposed, isEmpty);
+
+        show.value = false;
+        await tester.pumpAndSettle();
+
+        expect(find.text('hidden'), findsOneWidget);
+        expect(disposed, [1, 2, 3]);
+      },
+    );
+
     testWidgets(
       'should auto-dispose an override that enables autoDispose',
       (tester) async {
@@ -2541,6 +3403,12 @@ class _Controller {
 
   final int id;
   int value;
+}
+
+class _Dependent {
+  const _Dependent(this.resource);
+
+  final _Resource resource;
 }
 
 class _Resource implements Disposable {

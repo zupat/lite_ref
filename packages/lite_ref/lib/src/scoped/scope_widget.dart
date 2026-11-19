@@ -11,6 +11,21 @@ typedef _Cache = Map<Object, ScopedObject<dynamic>>;
 /// the abandoned instance can be disposed while its consumer stays mounted.
 final _consumerBindings = <Element, Map<Object, _RefScopeElement>>{};
 
+void _disposeSafely(ScopedObject<dynamic> ref) {
+  try {
+    ref._dispose();
+  } catch (error, stackTrace) {
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: error,
+        stack: stackTrace,
+        library: 'lite_ref',
+        context: ErrorDescription('while disposing a scoped ref'),
+      ),
+    );
+  }
+}
+
 /// Dependency injection of [ScopedRef]s.
 class LiteRefScope extends InheritedWidget {
   /// Create a new [LiteRefScope]
@@ -45,8 +60,9 @@ class LiteRefScope extends InheritedWidget {
     IScopedRef<dynamic> ref, {
     List<_RefScopeElement>? traversed,
   }) {
-    final element =
-        context.getElementForInheritedWidgetOfExactType<LiteRefScope>();
+    final element = context is _RefScopeElement
+        ? context
+        : context.getElementForInheritedWidgetOfExactType<LiteRefScope>();
 
     assert(
       element != null,
@@ -143,7 +159,14 @@ class _RefScopeElement extends InheritedElement {
   /// Refs evicted from the cache because an override changed.
   late final _evictedRefs = <ScopedObject<dynamic>>[];
 
+  /// Objects whose factories resolved a ref ID through this scope.
+  late final _lookupDependents = <Object, Set<ScopedObject<dynamic>>>{};
+
+  _RefScopeElement? _deactivatedParent;
+
   bool _disposalScheduled = false;
+
+  bool _flushingDisposals = false;
 
   void _addDependent(Element element) {
     if (_listeningElements.add(element)) {
@@ -151,6 +174,24 @@ class _RefScopeElement extends InheritedElement {
       // so we get notified when it is deactivated
       element.dependOnInheritedElement(this);
     }
+  }
+
+  void _addObjectDependency(
+    ScopedObject<dynamic> dependent,
+    ScopedObject<dynamic> dependency,
+  ) {
+    if (!dependent._dependencies.add(dependency)) return;
+
+    dependency._dependents.add(dependent);
+    dependency._watchCount++;
+  }
+
+  void _addLookupDependency(
+    ScopedObject<dynamic> dependent,
+    Object id,
+  ) {
+    _lookupDependents.putIfAbsent(id, () => {}).add(dependent);
+    dependent._lookupRegistrations.putIfAbsent(this, () => {}).add(id);
   }
 
   void _addAutoDisposeBinding(Element element, ScopedObject<dynamic> ref) {
@@ -231,51 +272,96 @@ class _RefScopeElement extends InheritedElement {
   }
 
   void _scheduleDisposalFlush() {
-    if (_disposalScheduled) return;
+    if (_disposalScheduled || _flushingDisposals) return;
     _disposalScheduled = true;
 
-    SchedulerBinding.instance.addPostFrameCallback((_) {
-      _disposalScheduled = false;
+    final scheduler = SchedulerBinding.instance
+      ..addPostFrameCallback((_) {
+        _disposalScheduled = false;
 
-      // If this scope went away, unmount already disposed everything.
-      if (!mounted) return;
+        // If this scope went away, unmount already disposed everything.
+        if (!mounted) return;
 
-      for (final ref in _pendingDisposals) {
-        // It may have been re-bound during the same frame, e.g. when a
-        // widget is moved with a GlobalKey.
-        if (ref._watchCount > 0) continue;
-        if (!identical(_cache[ref._id], ref)) continue;
-        _cache.remove(ref._id);
-        ref._dispose();
-      }
-      _pendingDisposals.clear();
+        _flushingDisposals = true;
+        try {
+          // Releasing a dependent can enqueue its dependencies. Drain each wave
+          // in this flush instead of waiting for another frame that may never
+          // be scheduled.
+          while (_pendingDisposals.isNotEmpty || _evictedRefs.isNotEmpty) {
+            // Clear both queues before running user disposers. A throwing
+            // disposer must not leave entries queued or prevent other cleanup.
+            final pending = List<ScopedObject<dynamic>>.of(_pendingDisposals);
+            final evicted = List<ScopedObject<dynamic>>.of(_evictedRefs);
+            _pendingDisposals.clear();
+            _evictedRefs.clear();
 
-      // Evicted refs are no longer reachable through this scope, so they
-      // must be disposed even if some consumer still holds a stale value.
-      for (final ref in _evictedRefs) {
-        ref._dispose();
-      }
-      _evictedRefs.clear();
-    });
+            for (final ref in pending) {
+              // It may have been re-bound during the same frame, e.g. when a
+              // widget is moved with a GlobalKey.
+              if (ref._watchCount > 0) continue;
+              if (!identical(_cache[ref._id], ref)) continue;
+              _cache.remove(ref._id);
+              _disposeSafely(ref);
+            }
+
+            // Evicted refs are no longer reachable through this scope. A
+            // dependency defers disposal until its dependents have released it.
+            for (final ref in evicted) {
+              _disposeSafely(ref);
+            }
+          }
+        } finally {
+          _flushingDisposals = false;
+        }
+      });
+
+    // A dependent in another scope can enqueue this scope's cleanup from
+    // inside the current post-frame flush. Registering another callback there
+    // does not schedule a frame, so request one when this scope is idle or
+    // already past the frame's callback phase.
+    final phase = scheduler.schedulerPhase;
+    if (phase == SchedulerPhase.idle ||
+        phase == SchedulerPhase.postFrameCallbacks) {
+      scheduler.scheduleFrame();
+    }
   }
 
   @override
   void deactivate() {
+    _deactivatedParent = _parentScope;
+
     // if this widget gets replaced by another LiteRefScope
     // (eg: hot-reload when it or one of its ancestors has a UniqueKey).
-    // We need to store a copy of all Refs in our cache so we don't dispose
-    // refs being used by its replacement.
-    _oldRefs.addAll(_cache.values.map((e) => e._copy()));
+    // Keep a snapshot of all Refs in our cache so we don't dispose refs being
+    // used by its replacement. Keep the objects themselves to preserve their
+    // dependency relationships if this scope unmounts.
+    _oldRefs.addAll(_cache.values);
     super.deactivate();
   }
 
-// coverage:ignore-start
   @override
   void activate() {
     super.activate();
     _oldRefs.clear();
+
+    if (!identical(_deactivatedParent, _parentScope)) {
+      final roots = _cache.values.where((ref) {
+        return ref._dependencies.any(
+              (dependency) => !identical(dependency._owner, this),
+            ) ||
+            ref._lookupRegistrations.keys.any(
+              (lookupScope) => !identical(lookupScope, this),
+            );
+      }).toList();
+
+      final affectedScopes = _evictWithDependents(roots);
+      if (roots.isNotEmpty) {
+        _notifyAffectedScopes(scope, affectedScopes);
+      }
+    }
+
+    _deactivatedParent = null;
   }
-// coverage:ignore-end
 
   @override
   void updated(covariant InheritedWidget oldWidget) {
@@ -292,33 +378,95 @@ class _RefScopeElement extends InheritedElement {
     // override set is untouched.
     if (changedIds.isEmpty && !onlyOverridesChanged) return;
 
+    final evictNonOverrides = !oldWidget.onlyOverrides && scope.onlyOverrides;
+    final overrideIds = <Object>{
+      for (final ref in scope.overrides ?? const <IScopedRef<dynamic>>{})
+        _idOf(ref),
+    };
+    final roots = _cache.values.where((ref) {
+      if (changedIds.any((id) => _keyBelongsTo(ref._id, id))) return true;
+      return evictNonOverrides &&
+          !overrideIds.any((id) => _keyBelongsTo(ref._id, id));
+    }).toList();
+
+    // A changed lookup path also invalidates dependents even when the previous
+    // dependency was cached in an ancestor rather than in this scope.
+    for (final id in changedIds) {
+      roots.addAll(_lookupDependents[id] ?? const {});
+    }
+    if (onlyOverridesChanged) {
+      roots.addAll(_lookupDependents.values.expand((refs) => refs));
+    }
+
+    final affectedScopes = _evictWithDependents(roots);
+    _notifyAffectedScopes(oldWidget, affectedScopes);
+  }
+
+  Set<_RefScopeElement> _evictWithDependents(
+    Iterable<ScopedObject<dynamic>> roots,
+  ) {
+    // Evict dependents before their dependencies. This includes dependents in
+    // descendant scopes because a lookup change invalidates every object that
+    // captured the old value.
     final evicted = <ScopedObject<dynamic>>[];
+    final visited = Set<ScopedObject<dynamic>>.identity();
 
-    _cache.removeWhere((key, ref) {
-      if (!changedIds.any((id) => _keyBelongsTo(key, id))) return false;
-      evicted.add(ref);
-      return true;
-    });
-
-    for (final ref in evicted) {
-      for (final refs in _autoDisposeBindings.values) {
-        refs.remove(ref);
+    void collect(ScopedObject<dynamic> ref) {
+      if (!visited.add(ref)) return;
+      for (final dependent in List.of(ref._dependents)) {
+        collect(dependent);
       }
+      evicted.add(ref);
+    }
+
+    for (final ref in roots) {
+      collect(ref);
+    }
+
+    final affectedScopes = <_RefScopeElement>{this};
+    for (final ref in evicted) {
+      ref._owner._evict(ref);
+      affectedScopes.add(ref._owner);
+    }
+    return affectedScopes;
+  }
+
+  void _notifyAffectedScopes(
+    LiteRefScope oldWidget,
+    Set<_RefScopeElement> affectedScopes,
+  ) {
+    // Rebuild listeners in every scope that lost a cached object. Consumers of
+    // refs with `autoDispose: false` are included, and listeners are notified
+    // even when nothing was evicted: gaining an override, or toggling
+    // `onlyOverrides`, changes which scope serves the ref.
+    for (final affectedScope in affectedScopes) {
+      if (!affectedScope.mounted) continue;
+      for (final dependent
+          in List<Element>.of(affectedScope._listeningElements)) {
+        if (dependent.mounted) {
+          affectedScope.notifyDependent(oldWidget, dependent);
+        }
+      }
+    }
+  }
+
+  void _evict(ScopedObject<dynamic> ref) {
+    if (identical(_cache[ref._id], ref)) {
+      _cache.remove(ref._id);
+    }
+
+    for (final element in List<Element>.of(_autoDisposeBindings.keys)) {
+      final refs = _autoDisposeBindings[element];
+      refs?.remove(ref);
+      if (refs?.isEmpty ?? false) {
+        _autoDisposeBindings.remove(element);
+      }
+    }
+
+    if (!_evictedRefs.contains(ref)) {
       _evictedRefs.add(ref);
     }
-
-    if (evicted.isNotEmpty) {
-      _scheduleDisposalFlush();
-    }
-
-    // Rebuild every listener so it can resolve the replacement before the
-    // evicted instances are disposed. Consumers of refs with
-    // `autoDispose: false` are included, and listeners are notified even when
-    // nothing was evicted: gaining an override, or toggling `onlyOverrides`,
-    // changes which scope serves the ref.
-    for (final dependent in List<Element>.of(_listeningElements)) {
-      notifyDependent(oldWidget, dependent);
-    }
+    _scheduleDisposalFlush();
   }
 
   /// Ids of the refs whose resolved override changed.
@@ -393,26 +541,33 @@ class _RefScopeElement extends InheritedElement {
   void unmount() {
     // this shouldn't be necessary but it's harmless
     // we should be able to just use _oldRefs.
-    final toBeDisposed = _oldRefs.isEmpty ? _cache.values : _oldRefs;
+    final toBeDisposed = List<ScopedObject<dynamic>>.of(
+      _oldRefs.isEmpty ? _cache.values : _oldRefs,
+    );
+    final evicted = List<ScopedObject<dynamic>>.of(_evictedRefs);
 
-    for (final ref in toBeDisposed) {
-      ref._dispose();
+    try {
+      for (final ref in toBeDisposed) {
+        _disposeSafely(ref);
+      }
+
+      // Only reachable when the scope unmounts in the same frame in which an
+      // override change evicted these refs, before the post-frame flush runs.
+      // coverage:ignore-start
+      for (final ref in evicted) {
+        _disposeSafely(ref);
+      }
+      // coverage:ignore-end
+    } finally {
+      _cache.clear();
+      _oldRefs.clear();
+      _evictedRefs.clear();
+      _pendingDisposals.clear();
+      _autoDisposeBindings.clear();
+      _listeningElements.clear();
+      _lookupDependents.clear();
+      _deactivatedParent = null;
+      super.unmount();
     }
-
-    // Only reachable when the scope unmounts in the same frame in which an
-    // override change evicted these refs, before the post-frame flush runs.
-    // coverage:ignore-start
-    for (final ref in _evictedRefs) {
-      ref._dispose();
-    }
-    // coverage:ignore-end
-
-    _cache.clear();
-    _oldRefs.clear();
-    _evictedRefs.clear();
-    _pendingDisposals.clear();
-    _autoDisposeBindings.clear();
-    _listeningElements.clear();
-    super.unmount();
   }
 }
