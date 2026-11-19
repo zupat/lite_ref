@@ -1,6 +1,6 @@
 name: lite_ref_core
 description: A lightweight dependency injection package for dart and flutter with support for overriding for testing.
-version: 0.1.2
+version: 0.1.3
 repository: https://github.com/zupat/lite_ref
 
 environment:

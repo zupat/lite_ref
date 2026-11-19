@@ -1,3 +1,11 @@
+## 0.8.4
+
+Patch release that points the package at its new repository location. There are
+no code or public API changes.
+
+-   [Docs] Updated the repository, banner, and coverage links to the new
+    `zupat/lite_ref` GitHub location.
+
 ## 0.8.3
 
 Patch release that picks up the `lite_ref_core` 0.1.2 concurrency fixes for
