@@ -45,23 +45,10 @@ List<ScopedObject<dynamic>> _rootsForOverrideChange({
 List<ScopedObject<dynamic>> _evictionOrder(
   Iterable<ScopedObject<dynamic>> roots,
 ) {
-  final evicted = <ScopedObject<dynamic>>[];
-  final visited = Set<ScopedObject<dynamic>>.identity();
-
-  void collect(ScopedObject<dynamic> ref) {
-    if (!visited.add(ref)) return;
-    for (final dependent
-        in ref._dependents.whereType<ScopedObject<dynamic>>()) {
-      collect(dependent);
-    }
-    evicted.add(ref);
-  }
-
-  for (final ref in roots) {
-    collect(ref);
-  }
-
-  return evicted;
+  return evictionOrder<ScopedObject<dynamic>>(
+    roots,
+    (ref) => ref._dependents.whereType<ScopedObject<dynamic>>(),
+  );
 }
 
 /// IDs of the refs whose resolved override changed.
