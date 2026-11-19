@@ -3,18 +3,26 @@ part of 'scoped.dart';
 /// A [ScopedFamilyRef] is a reference that needs a context to access instances.
 @immutable
 class ScopedFamilyRef<T, F> implements IScopedRef<T> {
-  ///  Creates a new [ScopedFamilyRef] which always return new instances.
-  /// If [autoDispose] is set to `true`, a instance will be disposed when
-  /// all the widgets that have access to instance are unmounted.
+  /// Creates a new [ScopedFamilyRef] which always return new instances.
+  ///
+  /// By default, a scope-owned instance is disposed when its last listening
+  /// widget is unmounted. Set [autoDispose] to `false` to keep it cached with
+  /// zero listeners; the scope still disposes it on unmount or override
+  /// replacement. Use [overrideWithValue] for an externally owned instance.
   ///
   /// A [dispose] function does not have to be provided if [T] implements
   /// [Disposable].
+  ///
+  /// The [create] context is the owning [LiteRefScope]'s context. Refs and
+  /// inherited lookups such as `Theme.of` resolve there, not in a descendant
+  /// consumer, so they do not see inherited widgets below the owning scope.
   ScopedFamilyRef(
     CtxFamilyCreateFn<T, F> create, {
     DisposeFn<T>? dispose,
     this.autoDispose = true,
   })  : _create = create,
         _onDispose = dispose,
+        _owned = true,
         _id = Object();
 
   const ScopedFamilyRef._(
@@ -22,29 +30,38 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
     Object id, {
     required this.autoDispose,
     DisposeFn<T>? dispose,
+    bool owned = true,
   })  : _create = create,
         _id = id,
-        _onDispose = dispose;
+        _onDispose = dispose,
+        _owned = owned;
 
   final Object _id;
 
-  /// Whether the instance should be disposed when all the widgets that have
-  /// access to the instance are unmounted.
+  /// Whether a scope-owned instance is disposed when it loses its last
+  /// listener.
+  ///
+  /// This does not control ownership: `autoDispose: false` values are still
+  /// disposed when the scope unmounts or their override is replaced. Use
+  /// [overrideWithValue] for values owned by the caller.
   @override
   final bool autoDispose;
 
   final DisposeFn<T>? _onDispose;
 
+  final bool _owned;
+
   final CtxFamilyCreateFn<T, F> _create;
 
-  ScopedObject<T> _createRefObject(BuildContext context, F family) {
-    final refObject = ScopedObject<T>(
+  ScopedObject<T> _createRefObject(_RefScopeElement owner, F family) {
+    return _createScopedObject<T>(
+      owner,
       id: (_id, family),
       dispose: _onDispose,
-      instance: _create(context, family),
+      create: () => _create(owner, family),
       autoDispose: autoDispose,
+      owned: _owned,
     );
-    return refObject;
   }
 
   /// Returns `true` if this [ScopedFamilyRef] with that [family] is initialized
@@ -64,6 +81,11 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
   ///
   /// If [listen] is `false`, the instance will not be disposed when the widget
   /// is unmounted.
+  ///
+  /// Every family key read by a listening widget remains bound until that
+  /// widget unmounts, including keys read by earlier builds. To release old
+  /// instances when [family] changes, put this lookup in a keyed child widget
+  /// whose key contains the family value.
   ///
   /// ```dart
   /// class ProductWidget extends StatelessWidget {
@@ -93,6 +115,15 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
     void bindIfNeeded(ScopedObject<dynamic> ref) {
       if (!listen) return;
 
+      final creating = _creatingRefs.isEmpty ? null : _creatingRefs.last;
+      if (creating != null) {
+        element._addObjectDependency(creating, ref);
+        for (final traversed in traversedScopes) {
+          traversed._addLookupDependency(creating, _id);
+        }
+        return;
+      }
+
       // Scopes that were traversed but did not serve the ref must notify
       // this consumer when their overrides change (e.g. an `onlyOverrides`
       // scope that gains an override for this ref).
@@ -112,13 +143,13 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
 
     if (refOverride != null) {
       final refObject =
-          (refOverride as ScopedFamilyRef)._createRefObject(context, family);
+          (refOverride as ScopedFamilyRef)._createRefObject(element, family);
       element._cache[refObject._id] = refObject;
       bindIfNeeded(refObject);
       return refObject._instance as T;
     }
 
-    final refObject = _createRefObject(context, family);
+    final refObject = _createRefObject(element, family);
 
     bindIfNeeded(refObject);
 
@@ -143,9 +174,16 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
   /// When used with a [LiteRefScope] overrides, any child widget that accesses
   /// the instance will use the new [create] function.
   ///
-  /// Set [autoDispose] to `false` if you're overriding with an existing
-  /// instance and you don't want the instance to be disposed
-  /// when all the widgets that have access to it are unmounted.
+  /// Set [autoDispose] to `false` to keep instances alive when they have no
+  /// listeners. The scope still disposes them when the scope unmounts or the
+  /// override is replaced, so use [overrideWithValue] for an externally owned
+  /// value. Callers migrating from
+  /// `overrideWith((_, __) => value, autoDispose: false)` should switch to
+  /// `overrideWithValue(value)` when the caller owns that value.
+  ///
+  /// The [create] context is the owning [LiteRefScope]'s context, so inherited
+  /// lookups do not see widgets between that scope and the requesting widget.
+  ///
   ///```dart
   ///LiteRefScope(
   ///    overrides: [
@@ -161,8 +199,22 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
     return ScopedFamilyRef._(
       create,
       _id,
-      dispose: autoDispose ? _onDispose : null,
+      dispose: _onDispose,
       autoDispose: autoDispose,
+    );
+  }
+
+  /// Overrides this ref with an externally owned [value] for every family.
+  ///
+  /// The scope never disposes [value], including when the scope unmounts or
+  /// this override is replaced. The value remains cached until then because
+  /// externally owned values use `autoDispose: false`.
+  ScopedFamilyRef<T, F> overrideWithValue(T value) {
+    return ScopedFamilyRef._(
+      (_, __) => value,
+      _id,
+      autoDispose: false,
+      owned: false,
     );
   }
 

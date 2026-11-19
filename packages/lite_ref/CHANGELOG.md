@@ -1,3 +1,26 @@
+## Unreleased
+
+-   [Fix] Scoped refs created inside another ref now resolve from the owning
+    scope, retain their dependencies, and release them only after dependent
+    disposers run. Replacing a dependency also rebuilds its dependents.
+    Lookup paths are revalidated when overrides or `onlyOverrides` change and
+    when a keyed scope moves to a new parent.
+-   [Fix] Chained dependency disposal now completes in the same post-frame
+    cleanup, including dependencies owned by another scope, failed factories
+    release acquired dependencies, stale family and
+    non-overridden entries are evicted when `onlyOverrides` is enabled, and
+    throwing or nullable disposers no longer interrupt or skip cleanup.
+-   [Feat] Added `overrideWithValue` for externally owned values that must never
+    be disposed by a scope.
+-   [Breaking] `autoDispose: false` now only disables zero-listener disposal.
+    Scope-owned values are still disposed on override replacement and scope
+    unmount. Migrate externally owned values from
+    `overrideWith((_) => value, autoDispose: false)` to
+    `overrideWithValue(value)`.
+-   [Behavior] Factories now receive the owning `LiteRefScope` context rather
+    than the requesting widget's context, which also affects inherited lookups
+    such as `Theme.of`.
+
 ## 0.8.4
 
 Patch release that points the package at its new repository location. There are
