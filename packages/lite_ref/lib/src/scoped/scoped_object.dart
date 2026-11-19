@@ -115,9 +115,7 @@ class ScopedObject<T> extends _Dependent {
   })  : _id = id,
         _instance = instance,
         _ownership = owned
-            ? (autoDispose
-                ? _LastListener<T>(dispose)
-                : _Retained<T>(dispose))
+            ? (autoDispose ? _LastListener<T>(dispose) : _Retained<T>(dispose))
             : _CallerOwned<T>(autoDispose: autoDispose);
 
   ScopedObject._({

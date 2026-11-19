@@ -26,6 +26,34 @@ void main() {
     expect(callerOwned.autoDispose, isTrue);
   });
 
+  test('refs expose and preserve their auto-dispose policy', () {
+    final retained = Ref.scoped((_) => 1, autoDispose: false);
+    expect(retained.autoDispose, isFalse);
+
+    final retainedOverride = retained.overrideWith(
+      (_) => 2,
+      autoDispose: false,
+    );
+    expect(retainedOverride.autoDispose, isFalse);
+
+    final callerOwned = retained.overrideWithValue(3);
+    expect(callerOwned.autoDispose, isFalse);
+
+    // Re-overriding a caller-owned ref creates a scope-owned value with no
+    // disposer to carry over.
+    final reOverridden = callerOwned.overrideWith((_) => 4);
+    expect(reOverridden.autoDispose, isTrue);
+
+    final family = Ref.scopedFamily<int, int>((_, family) => family);
+    expect(family.autoDispose, isTrue);
+
+    final retainedFamily = family.overrideWith(
+      (_, family) => family,
+      autoDispose: false,
+    );
+    expect(retainedFamily.autoDispose, isFalse);
+  });
+
   testWidgets('the public workflow resolves a scoped value', (tester) async {
     var creations = 0;
     final countRef = Ref.scoped((_) => ++creations);

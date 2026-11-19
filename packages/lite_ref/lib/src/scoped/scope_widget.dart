@@ -358,7 +358,7 @@ class _RefScopeElement extends InheritedElement {
         );
       }).toList();
 
-      final affectedScopes = _evictWithDependents(roots);
+      final affectedScopes = _applyEviction(_evictionOrder(roots));
       if (roots.isNotEmpty) {
         _notifyAffectedScopes(scope, affectedScopes);
       }
@@ -387,54 +387,27 @@ class _RefScopeElement extends InheritedElement {
       for (final ref in scope.overrides ?? const <IScopedRef<dynamic>>{})
         _idOf(ref),
     };
-    final roots = _cache.values.where((ref) {
-      if (changedIds.any((id) => _keyBelongsTo(ref._id, id))) return true;
-      return evictNonOverrides &&
-          !overrideIds.any((id) => _keyBelongsTo(ref._id, id));
-    }).toList();
+    final roots = _rootsForOverrideChange(
+      cached: _cache.values,
+      changedIds: changedIds,
+      overrideIds: overrideIds,
+      evictNonOverrides: evictNonOverrides,
+      lookupDependents: _lookupDependents,
+      onlyOverridesChanged: onlyOverridesChanged,
+    );
 
-    // A changed lookup path also invalidates dependents even when the previous
-    // dependency was cached in an ancestor rather than in this scope.
-    for (final id in changedIds) {
-      final dependents = _lookupDependents[id];
-      if (dependents != null) {
-        roots.addAll(dependents.whereType<ScopedObject<dynamic>>());
-      }
-    }
-    if (onlyOverridesChanged) {
-      roots.addAll(
-        _lookupDependents.values
-            .expand((refs) => refs)
-            .whereType<ScopedObject<dynamic>>(),
-      );
-    }
-
-    final affectedScopes = _evictWithDependents(roots);
+    final affectedScopes = _applyEviction(_evictionOrder(roots));
     _notifyAffectedScopes(oldWidget, affectedScopes);
   }
 
-  Set<_RefScopeElement> _evictWithDependents(
-    Iterable<ScopedObject<dynamic>> roots,
+  /// Applies an eviction order produced by [_evictionOrder].
+  ///
+  /// Dependents appear before their dependencies, including dependents in
+  /// descendant scopes: a lookup change invalidates every object that captured
+  /// the old value.
+  Set<_RefScopeElement> _applyEviction(
+    Iterable<ScopedObject<dynamic>> evicted,
   ) {
-    // Evict dependents before their dependencies. This includes dependents in
-    // descendant scopes because a lookup change invalidates every object that
-    // captured the old value.
-    final evicted = <ScopedObject<dynamic>>[];
-    final visited = Set<ScopedObject<dynamic>>.identity();
-
-    void collect(ScopedObject<dynamic> ref) {
-      if (!visited.add(ref)) return;
-      for (final dependent
-          in ref._dependents.whereType<ScopedObject<dynamic>>()) {
-        collect(dependent);
-      }
-      evicted.add(ref);
-    }
-
-    for (final ref in roots) {
-      collect(ref);
-    }
-
     final affectedScopes = <_RefScopeElement>{this};
     for (final ref in evicted) {
       ref._owner._evict(ref);
@@ -479,51 +452,6 @@ class _RefScopeElement extends InheritedElement {
       _evictedRefs.add(ref);
     }
     _scheduleDisposalFlush();
-  }
-
-  /// Ids of the refs whose resolved override changed.
-  ///
-  /// Overrides are compared by identity: two overrides for the same ref are
-  /// equal (`==`) by design, so only a new instance means a new override.
-  static Set<Object> _changedOverrideIds(
-    Set<IScopedRef<dynamic>>? oldOverrides,
-    Set<IScopedRef<dynamic>>? newOverrides,
-  ) {
-    final oldById = <Object, IScopedRef<dynamic>>{
-      for (final ref in oldOverrides ?? const <IScopedRef<dynamic>>{})
-        _idOf(ref): ref,
-    };
-    final newById = <Object, IScopedRef<dynamic>>{
-      for (final ref in newOverrides ?? const <IScopedRef<dynamic>>{})
-        _idOf(ref): ref,
-    };
-
-    final changed = <Object>{};
-
-    for (final entry in newById.entries) {
-      final previous = oldById[entry.key];
-      if (previous == null || !identical(previous, entry.value)) {
-        changed.add(entry.key);
-      }
-    }
-
-    for (final id in oldById.keys) {
-      if (!newById.containsKey(id)) changed.add(id);
-    }
-
-    return changed;
-  }
-
-  static Object _idOf(IScopedRef<dynamic> ref) => switch (ref) {
-        ScopedRef() => ref._id,
-        ScopedFamilyRef() => ref._id,
-      };
-
-  /// Cache keys are `_id` for a [ScopedRef] and `(_id, family)` for a
-  /// [ScopedFamilyRef]. The family argument may be `null`.
-  static bool _keyBelongsTo(Object key, Object id) {
-    if (key == id) return true;
-    return key is (Object, Object?) && key.$1 == id;
   }
 
   @override

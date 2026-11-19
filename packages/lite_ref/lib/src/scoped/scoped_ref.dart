@@ -22,9 +22,8 @@ class ScopedRef<T> implements IScopedRef<T> {
     bool autoDispose = true,
   })  : _create = create,
         _id = Object(),
-        _ownership = autoDispose
-            ? _LastListener<T>(dispose)
-            : _Retained<T>(dispose);
+        _ownership =
+            autoDispose ? _LastListener<T>(dispose) : _Retained<T>(dispose);
 
   const ScopedRef._(
     CtxCreateFn<T> create,
@@ -146,9 +145,8 @@ class ScopedRef<T> implements IScopedRef<T> {
     return ScopedRef._(
       create,
       _id,
-      ownership: autoDispose
-          ? _LastListener<T>(dispose)
-          : _Retained<T>(dispose),
+      ownership:
+          autoDispose ? _LastListener<T>(dispose) : _Retained<T>(dispose),
     );
   }
 

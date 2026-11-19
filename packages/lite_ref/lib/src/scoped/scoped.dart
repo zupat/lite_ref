@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:lite_ref/lite_ref.dart';
 
 part 'i_scoped_ref.dart';
+part 'scoped_analysis.dart';
 part 'scope_widget.dart';
 part 'scoped_family_ref.dart';
 part 'scoped_lookup.dart';
