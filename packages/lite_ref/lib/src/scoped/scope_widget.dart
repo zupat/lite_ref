@@ -9,7 +9,7 @@ typedef _Cache = Map<Object, ScopedObject<dynamic>>;
 /// When a ref starts resolving to another scope (an `onlyOverrides` scope
 /// gaining an override), the stale binding is released through this index so
 /// the abandoned instance can be disposed while its consumer stays mounted.
-final _consumerBindings = <Element, Map<Object, _RefScopeElement>>{};
+final _consumerBindings = Expando<Map<Object, _RefScopeElement>>();
 
 void _disposeSafely(ScopedObject<dynamic> ref) {
   try {
@@ -161,6 +161,13 @@ class _RefScopeElement extends InheritedElement {
 
   /// Objects whose factories resolved a ref ID through this scope.
   late final _lookupDependents = <Object, Set<_Dependent>>{};
+
+  /// Factories currently running for objects owned by this scope.
+  ///
+  /// The owning element is also the creation context handed to factories, so
+  /// a lookup made from a factory can discover its pending object without
+  /// library-global state.
+  late final _creatingStack = <_PendingScopedObject<dynamic>>[];
 
   _RefScopeElement? _deactivatedParent;
 
@@ -526,7 +533,7 @@ class _RefScopeElement extends InheritedElement {
     // it would otherwise keep its bindings in the old scope forever.
     final refs = _autoDisposeBindings.remove(dependent);
     _listeningElements.remove(dependent);
-    _consumerBindings.remove(dependent);
+    _consumerBindings[dependent] = null;
 
     if (refs != null) {
       for (final ref in refs) {
@@ -571,6 +578,7 @@ class _RefScopeElement extends InheritedElement {
       _autoDisposeBindings.clear();
       _listeningElements.clear();
       _lookupDependents.clear();
+      _creatingStack.clear();
       _deactivatedParent = null;
       super.unmount();
     }

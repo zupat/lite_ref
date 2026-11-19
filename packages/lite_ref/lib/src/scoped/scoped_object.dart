@@ -1,8 +1,5 @@
 part of 'scoped.dart';
 
-/// Objects whose factories are currently running.
-final _creatingRefs = <_PendingScopedObject<dynamic>>[];
-
 /// Who is responsible for disposing a scoped value.
 ///
 /// Only the two scope-owned variants carry disposal behavior, so a
@@ -256,7 +253,7 @@ ScopedObject<T> _createScopedObject<T>(
     ownership: ownership,
   );
 
-  _creatingRefs.add(pending);
+  owner._creatingStack.add(pending);
 
   try {
     // Only a completed entry enters the cache, including one whose value is
@@ -267,6 +264,10 @@ ScopedObject<T> _createScopedObject<T>(
     pending.abandon();
     rethrow;
   } finally {
-    _creatingRefs.remove(pending);
+    assert(
+      identical(owner._creatingStack.last, pending),
+      'Factories must complete in the order they started.',
+    );
+    owner._creatingStack.removeLast();
   }
 }

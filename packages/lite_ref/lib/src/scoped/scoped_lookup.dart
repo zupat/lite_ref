@@ -21,7 +21,7 @@ T _resolveScoped<T>({
 }) {
   final traversedScopes = <_RefScopeElement>[];
   final element = LiteRefScope._of(context, ref, traversed: traversedScopes);
-  final creating = _creatingRefs.isEmpty ? null : _creatingRefs.last;
+  final creating = _creationContext(context);
 
   final existing = element._cache[cacheKey];
 
@@ -58,4 +58,12 @@ T _resolveScoped<T>({
   bindIfNeeded(object);
   element._cache[object._id] = object;
   return object._instance;
+}
+
+/// The factory that is running when [context] is its creation context.
+_PendingScopedObject<dynamic>? _creationContext(BuildContext context) {
+  if (context is! _RefScopeElement) return null;
+
+  final stack = context._creatingStack;
+  return stack.isEmpty ? null : stack.last;
 }
