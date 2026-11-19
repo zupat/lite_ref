@@ -6,5 +6,6 @@ import 'package:lite_ref/lite_ref.dart';
 part 'i_scoped_ref.dart';
 part 'scope_widget.dart';
 part 'scoped_family_ref.dart';
+part 'scoped_lookup.dart';
 part 'scoped_ref.dart';
 part 'scoped_object.dart';

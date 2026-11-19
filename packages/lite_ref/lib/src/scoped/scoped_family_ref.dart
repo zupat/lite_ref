@@ -19,22 +19,20 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
   ScopedFamilyRef(
     CtxFamilyCreateFn<T, F> create, {
     DisposeFn<T>? dispose,
-    this.autoDispose = true,
+    bool autoDispose = true,
   })  : _create = create,
-        _onDispose = dispose,
-        _owned = true,
-        _id = Object();
+        _id = Object(),
+        _ownership = autoDispose
+            ? _LastListener<T>(dispose)
+            : _Retained<T>(dispose);
 
   const ScopedFamilyRef._(
     CtxFamilyCreateFn<T, F> create,
     Object id, {
-    required this.autoDispose,
-    DisposeFn<T>? dispose,
-    bool owned = true,
+    required _Ownership<T> ownership,
   })  : _create = create,
         _id = id,
-        _onDispose = dispose,
-        _owned = owned;
+        _ownership = ownership;
 
   final Object _id;
 
@@ -45,11 +43,9 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
   /// disposed when the scope unmounts or their override is replaced. Use
   /// [overrideWithValue] for values owned by the caller.
   @override
-  final bool autoDispose;
+  bool get autoDispose => _ownership.autoDispose;
 
-  final DisposeFn<T>? _onDispose;
-
-  final bool _owned;
+  final _Ownership<T> _ownership;
 
   final CtxFamilyCreateFn<T, F> _create;
 
@@ -57,10 +53,8 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
     return _createScopedObject<T>(
       owner,
       id: (_id, family),
-      dispose: _onDispose,
       create: () => _create(owner, family),
-      autoDispose: autoDispose,
-      owned: _owned,
+      ownership: _ownership,
     );
   }
 
@@ -74,8 +68,10 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
 
     final element = LiteRefScope._of(context, this);
 
-    return element._cache.containsKey((_id, family));
+    return element._cache.containsKey(_cacheKey(family));
   }
+
+  Object _cacheKey(F family) => (_id, family);
 
   /// Returns the instance of [T] in the current scope for that family.
   ///
@@ -107,55 +103,17 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
       'This must be called with the context of a Widget.',
     );
 
-    final traversedScopes = <_RefScopeElement>[];
-    final element = LiteRefScope._of(context, this, traversed: traversedScopes);
-
-    final existing = element._cache[(_id, family)];
-
-    void bindIfNeeded(ScopedObject<dynamic> ref) {
-      if (!listen) return;
-
-      final creating = _creatingRefs.isEmpty ? null : _creatingRefs.last;
-      if (creating != null) {
-        element._addObjectDependency(creating, ref);
-        for (final traversed in traversedScopes) {
-          traversed._addLookupDependency(creating, _id);
-        }
-        return;
-      }
-
-      // Scopes that were traversed but did not serve the ref must notify
-      // this consumer when their overrides change (e.g. an `onlyOverrides`
-      // scope that gains an override for this ref).
-      for (final traversed in traversedScopes) {
-        traversed._addDependent(context as Element);
-      }
-
-      element._bind(context as Element, ref);
-    }
-
-    if (existing != null) {
-      bindIfNeeded(existing);
-      return existing._instance as T;
-    }
-
-    final refOverride = element.scope.overrides?.lookup(this);
-
-    if (refOverride != null) {
-      final refObject =
-          (refOverride as ScopedFamilyRef)._createRefObject(element, family);
-      element._cache[refObject._id] = refObject;
-      bindIfNeeded(refObject);
-      return refObject._instance as T;
-    }
-
-    final refObject = _createRefObject(element, family);
-
-    bindIfNeeded(refObject);
-
-    element._cache[refObject._id] = refObject;
-
-    return refObject._instance;
+    return _resolveScoped<T>(
+      context: context,
+      ref: this,
+      lookupId: _id,
+      cacheKey: _cacheKey(family),
+      listen: listen,
+      create: (element, effective) {
+        return (effective as ScopedFamilyRef<T, F>)
+            ._createRefObject(element, family);
+      },
+    );
   }
 
   /// Returns the instance of [T] in the current scope without disposing it
@@ -196,11 +154,13 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
     CtxFamilyCreateFn<T, F> create, {
     bool autoDispose = true,
   }) {
+    final dispose = _disposerOf(_ownership);
     return ScopedFamilyRef._(
       create,
       _id,
-      dispose: _onDispose,
-      autoDispose: autoDispose,
+      ownership: autoDispose
+          ? _LastListener<T>(dispose)
+          : _Retained<T>(dispose),
     );
   }
 
@@ -213,8 +173,7 @@ class ScopedFamilyRef<T, F> implements IScopedRef<T> {
     return ScopedFamilyRef._(
       (_, __) => value,
       _id,
-      autoDispose: false,
-      owned: false,
+      ownership: _CallerOwned<T>(),
     );
   }
 

@@ -2,6 +2,57 @@ part of 'scoped.dart';
 
 final _creatingRefs = <ScopedObject<dynamic>>[];
 
+/// Who is responsible for disposing a scoped value.
+///
+/// Only the two scope-owned variants carry disposal behavior, so a
+/// caller-owned value is structurally incapable of being disposed by a scope.
+sealed class _Ownership<T> {
+  const _Ownership();
+
+  /// Whether the value is disposed when it loses its last listener.
+  bool get autoDispose;
+}
+
+/// The caller owns the value. The scope only releases its dependencies.
+final class _CallerOwned<T> extends _Ownership<T> {
+  const _CallerOwned({this.autoDispose = false});
+
+  @override
+  final bool autoDispose;
+}
+
+/// The scope owns the value.
+sealed class _ScopeOwned<T> extends _Ownership<T> {
+  const _ScopeOwned(this.dispose);
+
+  final DisposeFn<T>? dispose;
+}
+
+/// Scope-owned and retained until the scope unmounts or the override is
+/// replaced.
+final class _Retained<T> extends _ScopeOwned<T> {
+  const _Retained(super.dispose);
+
+  @override
+  bool get autoDispose => false;
+}
+
+/// Scope-owned and disposed when the last listener goes away, in addition to
+/// the retained lifetime events.
+final class _LastListener<T> extends _ScopeOwned<T> {
+  const _LastListener(super.dispose);
+
+  @override
+  bool get autoDispose => true;
+}
+
+DisposeFn<T>? _disposerOf<T>(_Ownership<T> ownership) {
+  return switch (ownership) {
+    _ScopeOwned<T>(:final dispose) => dispose,
+    _CallerOwned<T>() => null,
+  };
+}
+
 /// A [ScopedObject] is a reference that holds an instance of [T].
 ///
 /// If [autoDispose] is `true`, the instance is disposed when all widgets that
@@ -14,21 +65,21 @@ class ScopedObject<T> {
     required Object id,
     required T instance,
     DisposeFn<T>? dispose,
-    this.autoDispose = true,
+    bool autoDispose = true,
     bool owned = true,
   })  : _id = id,
-        _onDispose = dispose,
         _instance = instance,
-        _owned = owned;
+        _ownership = owned
+            ? (autoDispose
+                ? _LastListener<T>(dispose)
+                : _Retained<T>(dispose))
+            : _CallerOwned<T>(autoDispose: autoDispose);
 
   ScopedObject._creating({
     required Object id,
-    DisposeFn<T>? dispose,
-    this.autoDispose = true,
-    bool owned = true,
+    required _Ownership<T> ownership,
   })  : _id = id,
-        _onDispose = dispose,
-        _owned = owned;
+        _ownership = ownership;
 
   late final T _instance;
 
@@ -36,13 +87,11 @@ class ScopedObject<T> {
 
   late final _RefScopeElement _owner;
 
+  final _Ownership<T> _ownership;
+
   /// Whether the instance should be disposed when all the widgets that have
   /// access to the instance are unmounted.
-  final bool autoDispose;
-
-  final bool _owned;
-
-  final DisposeFn<T>? _onDispose;
+  bool get autoDispose => _ownership.autoDispose;
 
   final _dependencies = <ScopedObject<dynamic>>{};
 
@@ -71,16 +120,16 @@ class ScopedObject<T> {
     _disposed = true;
 
     try {
-      if (!_owned) return;
-
-      // An explicit disposer also receives successfully created null values.
-      _onDispose?.call(_instance);
-      if (_onDispose == null) {
-        if (_instance case final Disposable d) {
-          d.dispose();
-        } else if (_instance case final ChangeNotifier c) {
-          // covers ChangeNotifier and ValueNotifier
-          c.dispose();
+      if (_ownership case _ScopeOwned<T>(:final dispose)) {
+        // An explicit disposer also receives successfully created null values.
+        dispose?.call(_instance);
+        if (dispose == null) {
+          if (_instance case final Disposable d) {
+            d.dispose();
+          } else if (_instance case final ChangeNotifier c) {
+            // covers ChangeNotifier and ValueNotifier
+            c.dispose();
+          }
         }
       }
     } finally {
@@ -122,15 +171,11 @@ ScopedObject<T> _createScopedObject<T>(
   _RefScopeElement owner, {
   required Object id,
   required T Function() create,
-  DisposeFn<T>? dispose,
-  bool autoDispose = true,
-  bool owned = true,
+  required _Ownership<T> ownership,
 }) {
   final refObject = ScopedObject<T>._creating(
     id: id,
-    dispose: dispose,
-    autoDispose: autoDispose,
-    owned: owned,
+    ownership: ownership,
   ).._owner = owner;
 
   _creatingRefs.add(refObject);
