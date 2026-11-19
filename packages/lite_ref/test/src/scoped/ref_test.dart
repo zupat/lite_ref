@@ -14,6 +14,18 @@ void main() {
     expect(hashSet.contains(countRefClone), true);
   });
 
+  test('ScopedObject exposes its configured lifetime', () {
+    final cached = ScopedObject<int>(id: Object(), instance: 1);
+    final retained = ScopedObject<int>(
+      id: Object(),
+      instance: 2,
+      autoDispose: false,
+    );
+
+    expect(cached.autoDispose, isTrue);
+    expect(retained.autoDispose, isFalse);
+  });
+
   testWidgets('should cache values', (tester) async {
     var ran = 0;
     final countRef = Ref.scoped((ctx) => ++ran);
@@ -2038,12 +2050,14 @@ void main() {
       'a dependency released by another scope schedules its disposal frame',
       (tester) async {
         final dependency = _Resource();
-        final dependencyRef = Ref.scoped((_) => dependency);
+        final dependencyRef = Ref.scopedFamily<_Resource, int>(
+          (_, __) => dependency,
+        );
         final dependentRef = Ref.scoped<_Dependent>(
           (_) => throw StateError('An override is required'),
         );
         final dependentOverride = dependentRef.overrideWith(
-          (ctx) => _Dependent(dependencyRef(ctx)),
+          (ctx) => _Dependent(dependencyRef(ctx, 1)),
         );
 
         Widget tree({required bool listen}) {
@@ -2209,7 +2223,9 @@ void main() {
                 builder: (context, _) {
                   return Column(
                     children: [
+                      const SizedBox.shrink(),
                       if (current.value == 1) slot(first),
+                      const SizedBox.shrink(),
                       if (current.value == 2) slot(second),
                     ],
                   );

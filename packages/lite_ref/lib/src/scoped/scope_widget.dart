@@ -347,11 +347,8 @@ class _RefScopeElement extends InheritedElement {
     if (!identical(_deactivatedParent, _parentScope)) {
       final roots = _cache.values.where((ref) {
         return ref._dependencies.any(
-              (dependency) => !identical(dependency._owner, this),
-            ) ||
-            ref._lookupRegistrations.keys.any(
-              (lookupScope) => !identical(lookupScope, this),
-            );
+          (dependency) => !identical(dependency._owner, this),
+        );
       }).toList();
 
       final affectedScopes = _evictWithDependents(roots);
