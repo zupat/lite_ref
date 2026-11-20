@@ -1,3 +1,12 @@
+## 1.0.1
+
+-   [Fix] Fixed scoped-ref lifecycle and lookup bugs: refs created during a
+    descendant's `deactivate` leaked until scope unmount, moving an
+    intermediate `onlyOverrides` scope rebuilt the wrong dependencies, failed
+    lookups from `initState` leaked objects or blocked later bindings, and
+    re-entrant creation could overwrite the cache instead of throwing a
+    `StateError`.
+
 ## 1.0.0
 
 First stable release. The public API of `lite_ref` is now considered stable for
