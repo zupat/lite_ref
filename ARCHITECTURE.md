@@ -147,6 +147,69 @@ stateDiagram-v2
    `dispose`, else `Disposable`, else `ChangeNotifier`), and finally release
    dependencies.
 
+<details>
+<summary>Why <code>awaitingDependentRelease</code> is needed</summary>
+
+`awaitingDependentRelease` is entered in exactly one place, the `_dispose()`
+guard `if (_dependents.isNotEmpty)`. So it takes a **forced disposal of a
+dependency while a live `ScopedObject` still lists it in `_dependents`**. Object
+dependents already increment `_watchCount` (`_addObjectDependency`), so ordinary
+"last listener went away" cleanup can never land here — only unmount or
+eviction, which dispose regardless of `_watchCount`.
+
+### Scenario: a scope unmounting with a dependency chain
+
+```dart
+final dbRef = Ref.scoped<Db>((_) => Db(), dispose: (db) => db.close());
+final repoRef = Ref.scoped<Repo>(
+  (ctx) => Repo(dbRef(ctx)),           // repo depends on db
+  dispose: (repo) => repo.flush(),     // flush() still talks to db
+);
+
+// some LiteRefScope containing this:
+Builder(builder: (ctx) {
+  repoRef(ctx);                        // creates db, then repo
+  return const SizedBox.shrink();
+});
+```
+
+Now navigate away, or remove that `LiteRefScope` (a `testWidgets` teardown does
+the same).
+
+Cache order is insertion order (`_Cache` is a `Map`), and the dependency is
+created during the dependent's factory, so the cache is `[db, repo]`.
+`unmount()` disposes `_cache.values` in that order:
+
+1. `db._dispose()` → `db._dependents == {repo}` → `live →
+   awaitingDependentRelease`, returns. `db.close()` is **not** called.
+2. `repo._dispose()` → `repo.flush()` runs while `db` is still open; that is the
+   whole point.
+3. `repo`'s `finally` calls `_releaseDependencies()`, which removes `repo` from
+   `db._dependents`, sees `awaitingDependentRelease`, and calls
+   `_disposeSafely(db)` → `live → disposed`, `db.close()` runs.
+
+Result: `repo`'s disposer observes a usable `db`, and `db` is torn down last.
+Without the intermediate state, unmount order (dependency before dependent)
+would close `db` underneath `repo.flush()`.
+
+### Scenario: cross-scope eviction
+
+The same state is reachable through eviction. Dependency `db` is cached in a
+parent scope, dependent `repo` in a child scope; an override change evicts
+both. `_applyEviction` queues each object on **its own owner's** `_evictedRefs`,
+and each scope flushes independently in the post-frame phase. If the parent
+drains its queue while the child's `repo` is still queued (for example, the
+parent was already mid-flush), `db._dispose()` still sees `repo` in
+`_dependents` → `awaitingDependentRelease`; the child's later flush releases
+`repo` and completes `db`'s disposal.
+
+**Short version:** any `Ref.scoped` whose factory resolves another scoped ref,
+with both entries dying in the same scope teardown, deterministically passes
+through `awaitingDependentRelease` — because the dependency is both created and
+cached before its dependent, and `unmount` disposes in cache order.
+
+</details>
+
 ## Creation (`_PendingScopedObject`)
 
 Factories run in two phases so a half-built object can never enter the cache:
