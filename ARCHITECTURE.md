@@ -54,8 +54,8 @@ library (`scoped.dart`) so they can share private names:
 | `scope_widget.dart` | `LiteRefScope` (the `InheritedWidget`) and `_RefScopeElement` (all Flutter effects) |
 
 `src/ref.dart` holds the `Ref` static factories (`scoped`, `scopedFamily`, and
-the pass-throughs to `lite_ref_core`). `lib/lite_ref.dart` is the public
-surface; everything else is private.
+the pass-through factories to `lite_ref_core`). `lib/lite_ref.dart` is the
+public surface; everything else is private.
 
 ## Ref identity and overrides
 
