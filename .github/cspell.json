@@ -17,6 +17,7 @@
   "useGitignore": true,
   "words": [
     "lite_ref",
+    "reentrancy",
     "zupat"
   ]
 }
