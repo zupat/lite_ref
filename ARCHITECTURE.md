@@ -335,6 +335,80 @@ When it drops below 1, `_scheduleDisposal` queues the object; a post-frame flush
 drains `_pendingDisposals` and `_evictedRefs`, re-checking `_watchCount > 0`
 first so a widget moved with a `GlobalKey` in the same frame keeps its instance.
 
+<details>
+<summary>Why binding is per element and disposal is deferred</summary>
+
+Two separate problems are solved here: knowing *which* element keeps *which*
+object alive, and *when* it is safe to dispose that object. A plain refcount
+can answer "is anyone still using this?" but not "which binding belongs to the
+element that is going away?", and an immediate decrement cannot survive a
+widget that leaves one parent and re-enters another within the same frame.
+
+### Scenario: a mounted consumer switches scopes
+
+A widget stays mounted, but an `onlyOverrides` scope above it gains an override
+for the ref it reads:
+
+```dart
+LiteRefScope(
+  overrides: {countRef.overrideWith((_) => 1)},
+  child: LiteRefScope(
+    onlyOverrides: true,
+    overrides: current.value == 0 ? null : {countRef.overrideWith((_) => 2)},
+    child: consumer, // never unmounts
+  ),
+)
+```
+
+1. Initially `consumer` binds `countRef` to the outer scope, and
+   `_consumerBindings[consumer][key]` records the outer scope.
+2. The inner scope's override change has nothing cached to evict, but it still
+   notifies its listening elements (the consumer): gaining an override changes
+   which scope serves the ref.
+3. `consumer` rebuilds and resolves through the inner scope. `_bind` sees the
+   previous owner is the outer scope and calls
+   `previous._releaseBinding(consumer, key)`, which decrements the outer
+   object's `_watchCount` and schedules its disposal.
+4. The old instance is disposed even though the element never unmounted. The
+   regression test asserts `disposed == [1]` before the scope ever tears down.
+
+This is why `_consumerBindings` is a global `Expando` keyed by the element
+rather than a field on one scope: `_bind` must find the previous owner even
+though that binding was created by a different scope element, and
+`removeDependent` must drop only this scope's entry while the element lives on.
+The `identical(scope, this)` filter matters because one element can hold
+bindings in several scopes (an `onlyOverrides` chain), and only the stale one
+may be released.
+
+### Scenario: a widget moves with a `GlobalKey`
+
+1. During a build, the keyed widget leaves its old parent. Flutter deactivates
+   it, `removeDependent` runs, `_watchCount` hits 0, and `_scheduleDisposal`
+   queues the object.
+2. In the same build, the widget is inserted under its new parent, resolves the
+   ref again, and `_addAutoDisposeBinding` brings `_watchCount` back to 1.
+3. The post-frame flush re-checks `_watchCount > 0` and skips the queued
+   object. Disposing immediately in step 1 would have torn down an instance the
+   same frame reuses.
+
+The same queue also covers release cascades (`_releaseDependencies` can enqueue
+a dependency from inside a disposer) and cross-scope releases, which is why the
+flush drains wave after wave instead of waiting for another frame.
+
+### What is deliberately not bound
+
+`read` (`listen: false`) and `autoDispose: false` values create no
+`_autoDisposeBindings` entry. A read does not keep the value alive past the
+scope, and a `_Retained` value is disposed only on scope unmount or override
+replacement, never because its last listener left.
+
+**Short version:** bindings live on the element so they can be released even
+when the widget stays mounted, and actual disposal is deferred to a post-frame
+flush that re-checks the count, so the frame that moves a widget cannot dispose
+the instance it reuses.
+
+</details>
+
 ## Invalidation and eviction
 
 Invalidation is a pure "decide, then apply" split: the planners in `eviction.dart`
