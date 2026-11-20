@@ -17,9 +17,69 @@
     unmount. Migrate externally owned values from
     `overrideWith((_) => value, autoDispose: false)` to
     `overrideWithValue(value)`.
+
+    Before, `autoDispose: false` also meant "the scope never disposes this":
+
+    ```dart
+    LiteRefScope(
+      overrides: {
+        databaseRef.overrideWith((_) => sharedDatabase, autoDispose: false),
+      },
+      child: const App(),
+    );
+    ```
+
+    Now the scope still owns that value and closes it on unmount or replacement.
+    When the caller owns it, say so explicitly:
+
+    ```dart
+    LiteRefScope(
+      overrides: {databaseRef.overrideWithValue(sharedDatabase)},
+      child: const App(),
+    );
+    // The scope never disposes sharedDatabase; close it yourself.
+    ```
+
+    Keep `autoDispose: false` for a value the scope owns but should retain after
+    its last listener leaves.
+
 -   [Behavior] Factories now receive the owning `LiteRefScope` context rather
     than the requesting widget's context, which also affects inherited lookups
     such as `Theme.of`.
+
+    A factory is built once for the scope, so it cannot see inherited widgets
+    that sit *below* that scope:
+
+    ```dart
+    final brightnessRef = Ref.scoped((ctx) => Theme.of(ctx).brightness);
+
+    LiteRefScope(
+      child: Theme(
+        data: ThemeData(brightness: Brightness.dark),
+        child: Builder(
+          builder: (context) {
+            // Resolves above LiteRefScope, not the dark Theme below it.
+            return Text('${brightnessRef(context)}');
+          },
+        ),
+      ),
+    );
+    ```
+
+    Put inherited dependencies the factory needs above the scope instead:
+
+    ```dart
+    final brightnessRef = Ref.scoped((ctx) => Theme.of(ctx).brightness);
+
+    Theme(
+      data: ThemeData(brightness: Brightness.dark),
+      child: LiteRefScope(
+        child: Builder(
+          builder: (context) => Text('${brightnessRef(context)}'), // dark
+        ),
+      ),
+    );
+    ```
 
 ## 0.8.4
 
@@ -155,7 +215,7 @@ changes.
 
 ## 0.5.0
 
--   [Feat] Add autodipose for `ChangeNotifiers` and any class that implements `Disposable`. These classes will be disposed when all the widgets that have access to the instance are unmounted. If providing a existing and you don't want the instance to be disposed set `autoDispose` to `false`.
+-   [Feat] Add auto-disposal for `ChangeNotifiers` and any class that implements `Disposable`. These classes will be disposed when all the widgets that have access to the instance are unmounted. If providing a existing and you don't want the instance to be disposed set `autoDispose` to `false`.
 
     In the example below, the `CounterController` will be disposed when the `CounterView` is unmounted.
 
@@ -182,11 +242,11 @@ changes.
 
     @override
     Widget build(BuildContext context) {
-        final contoller = countControllerRef.of(context);
+        final controller = countControllerRef.of(context);
         return ListenableBuilder(
-        listenable: contoller,
+        listenable: controller,
         builder: (context, snapshot) {
-            return Text('${contoller.count}');
+            return Text('${controller.count}');
         },
         );
     }
