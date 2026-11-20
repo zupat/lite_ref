@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lite_ref/lite_ref.dart';
 import 'package:material_ui/material_ui.dart';
@@ -2282,6 +2284,186 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(disposed, [null]);
+      },
+    );
+
+    testWidgets(
+      'unmount keeps a dependency alive until its dependent is disposed',
+      (tester) async {
+        final dependency = _Resource();
+        final disposalOrder = <String>[];
+
+        final dependencyRef = Ref.scoped((_) => dependency);
+        final dependentRef = Ref.scoped(
+          (ctx) => _Dependent(dependencyRef(ctx)),
+          dispose: (dependent) {
+            disposalOrder.add('dependent');
+            expect(dependent.resource.disposed, isFalse);
+          },
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: Builder(
+                builder: (context) {
+                  dependentRef(context);
+                  return const SizedBox.shrink();
+                },
+              ),
+            ),
+          ),
+        );
+
+        expect(disposalOrder, isEmpty);
+        expect(dependency.disposed, isFalse);
+
+        await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+        await tester.pumpAndSettle();
+
+        expect(disposalOrder, ['dependent']);
+        expect(dependency.disposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'a dependency evicted from a parent scope outlives its child-scope '
+      'dependent',
+      (tester) async {
+        final first = _Resource();
+        final second = _Resource();
+        final current = ValueNotifier(0);
+        final disposalOrder = <String>[];
+
+        final resourceRef = Ref.scoped<_Resource>(
+          (_) => throw StateError('A parent override is required'),
+        );
+        final dependentRef = Ref.scoped<_Dependent>(
+          (_) => throw StateError('An inner override is required'),
+          dispose: (dependent) {
+            disposalOrder.add('dependent');
+            expect(dependent.resource.disposed, isFalse);
+          },
+        );
+        final dependentOverride = dependentRef.overrideWith(
+          (ctx) => _Dependent(resourceRef(ctx)),
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ListenableBuilder(
+              listenable: current,
+              builder: (context, _) {
+                return LiteRefScope(
+                  overrides: {
+                    resourceRef.overrideWith(
+                      (_) => current.value == 0 ? first : second,
+                    ),
+                  },
+                  child: LiteRefScope(
+                    onlyOverrides: true,
+                    overrides: {dependentOverride},
+                    child: Builder(
+                      builder: (context) {
+                        dependentRef(context);
+                        return const SizedBox.shrink();
+                      },
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+
+        expect(first.disposed, isFalse);
+
+        current.value = 1;
+        await tester.pumpAndSettle();
+
+        expect(disposalOrder, ['dependent']);
+        expect(first.disposed, isTrue);
+        expect(second.disposed, isFalse);
+      },
+    );
+
+    testWidgets(
+      'a lookup after a factory completes binds the element, not the object',
+      (tester) async {
+        final dependency = _Resource();
+        final gate = Completer<void>();
+        var lookups = 0;
+        late BuildContext captured;
+
+        final dependencyRef = Ref.scoped((_) {
+          lookups++;
+          return dependency;
+        });
+        final holderRef = Ref.scoped<Object>((ctx) {
+          captured = ctx;
+          unawaited(
+            Future<void>.microtask(() async {
+              await gate.future;
+              dependencyRef(captured);
+            }),
+          );
+          return Object();
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: Builder(
+                builder: (context) {
+                  holderRef(context);
+                  return const SizedBox.shrink();
+                },
+              ),
+            ),
+          ),
+        );
+
+        gate.complete();
+        await tester.pump();
+        await tester.pump();
+
+        // The late lookup ran, so a stale creation zone would have registered
+        // the finished object as a dependent of [dependency].
+        expect(lookups, 1);
+        expect(dependency.disposed, isFalse);
+
+        await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+        await tester.pumpAndSettle();
+
+        expect(dependency.disposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'a failed factory is retried instead of serving a cached entry',
+      (tester) async {
+        var calls = 0;
+        final flakyRef = Ref.scoped<int>((_) {
+          calls++;
+          if (calls == 1) throw StateError('first attempt fails');
+          return 42;
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: Builder(
+                builder: (context) {
+                  expect(() => flakyRef(context), throwsStateError);
+                  expect(flakyRef(context), 42);
+                  return const SizedBox.shrink();
+                },
+              ),
+            ),
+          ),
+        );
+
+        expect(calls, 2);
       },
     );
   });

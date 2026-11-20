@@ -1,92 +1,82 @@
 part of 'scoped.dart';
 
-final _creatingRefs = <ScopedObject<dynamic>>[];
-
-/// A [ScopedObject] is a reference that holds an instance of [T].
+/// Zone key for the factory that is currently running.
 ///
-/// If [autoDispose] is `true`, the instance is disposed when all widgets that
-/// have access to it are unmounted. This only controls zero-listener cleanup;
-/// scope-owned values are disposed on scope unmount and override replacement
-/// regardless.
-class ScopedObject<T> {
-  /// Creates a new [ScopedObject] with an [id] and an [instance].
-  ScopedObject({
-    required Object id,
-    required T instance,
-    DisposeFn<T>? dispose,
-    this.autoDispose = true,
-    bool owned = true,
-  })  : _id = id,
-        _onDispose = dispose,
-        _instance = instance,
-        _owned = owned;
+/// A zone value follows the synchronous factory call stack, unlike the old
+/// library-global list, so it cannot leak into other scopes or tests.
+final _creatingZoneKey = Object();
 
-  ScopedObject._creating({
-    required Object id,
-    DisposeFn<T>? dispose,
-    this.autoDispose = true,
-    bool owned = true,
-  })  : _id = id,
-        _onDispose = dispose,
-        _owned = owned;
+/// Who is responsible for disposing a scoped value.
+///
+/// Only the two scope-owned variants carry disposal behavior, so a
+/// caller-owned value is structurally incapable of being disposed by a scope.
+sealed class _Ownership<T> {
+  const _Ownership();
 
-  late final T _instance;
+  /// Whether the value is disposed when it loses its last listener.
+  bool get autoDispose;
+}
 
-  final Object _id;
+/// The caller owns the value. The scope only releases its dependencies.
+///
+/// [autoDispose] exists only to preserve the lifetime reported by
+/// `ScopedObject(owned: false)`, whose public constructor keeps the parameter.
+/// A caller-owned value is never disposed by a scope.
+final class _CallerOwned<T> extends _Ownership<T> {
+  const _CallerOwned({this.autoDispose = false});
 
-  late final _RefScopeElement _owner;
-
-  /// Whether the instance should be disposed when all the widgets that have
-  /// access to the instance are unmounted.
+  @override
   final bool autoDispose;
+}
 
-  final bool _owned;
+/// The scope owns the value.
+sealed class _ScopeOwned<T> extends _Ownership<T> {
+  const _ScopeOwned(this.dispose);
 
-  final DisposeFn<T>? _onDispose;
+  final DisposeFn<T>? dispose;
+}
 
+/// Scope-owned and retained until the scope unmounts or the override is
+/// replaced.
+final class _Retained<T> extends _ScopeOwned<T> {
+  const _Retained(super.dispose);
+
+  @override
+  bool get autoDispose => false;
+}
+
+/// Scope-owned and disposed when the last listener goes away, in addition to
+/// the retained lifetime events.
+final class _LastListener<T> extends _ScopeOwned<T> {
+  const _LastListener(super.dispose);
+
+  @override
+  bool get autoDispose => true;
+}
+
+DisposeFn<T>? _disposerOf<T>(_Ownership<T> ownership) {
+  return switch (ownership) {
+    _ScopeOwned<T>(:final dispose) => dispose,
+    _CallerOwned<T>() => null,
+  };
+}
+
+/// The lifecycle of a completed [ScopedObject].
+///
+/// The single impossible state of two booleans is gone: a ref is either live,
+/// waiting for its dependents to release it, or disposed.
+enum _Lifecycle { live, awaitingDependentRelease, disposed }
+
+/// A node that can acquire dependencies while it is being built or alive.
+///
+/// A [ScopedObject] is both a dependent and a potential dependency.
+/// A [_PendingScopedObject] is only ever a dependent: it is not in any cache
+/// until its factory succeeds.
+sealed class _Dependent {
   final _dependencies = <ScopedObject<dynamic>>{};
 
-  final _dependents = <ScopedObject<dynamic>>{};
-
-  /// Ref IDs whose lookups passed through other scopes during creation.
+  /// Ref IDs whose lookups passed through scopes during creation.
   final _lookupRegistrations = <_RefScopeElement, Set<Object>>{};
-
-  int _watchCount = 0;
-
-  bool _disposed = false;
-
-  bool _disposePending = false;
-
-  void _dispose() {
-    if (_disposed) return;
-
-    // An evicted dependency must remain usable by its dependents' disposers.
-    // The last dependent to release it completes the pending disposal.
-    if (_dependents.isNotEmpty) {
-      _disposePending = true;
-      return;
-    }
-
-    _disposePending = false;
-    _disposed = true;
-
-    try {
-      if (!_owned) return;
-
-      // An explicit disposer also receives successfully created null values.
-      _onDispose?.call(_instance);
-      if (_onDispose == null) {
-        if (_instance case final Disposable d) {
-          d.dispose();
-        } else if (_instance case final ChangeNotifier c) {
-          // covers ChangeNotifier and ValueNotifier
-          c.dispose();
-        }
-      }
-    } finally {
-      _releaseDependencies();
-    }
-  }
 
   void _releaseDependencies() {
     for (final entry in _lookupRegistrations.entries) {
@@ -109,7 +99,7 @@ class ScopedObject<T> {
       dependency._dependents.remove(this);
       dependency._watchCount--;
 
-      if (dependency._disposePending) {
+      if (dependency._lifecycle == _Lifecycle.awaitingDependentRelease) {
         _disposeSafely(dependency);
       } else if (dependency.autoDispose && dependency._watchCount < 1) {
         dependency._owner._scheduleDisposal(dependency);
@@ -118,31 +108,183 @@ class ScopedObject<T> {
   }
 }
 
+/// A [ScopedObject] is a reference that holds an instance of [T].
+///
+/// If [autoDispose] is `true`, the instance is disposed when all widgets that
+/// have access to it are unmounted. This only controls zero-listener cleanup;
+/// scope-owned values are disposed on scope unmount and override replacement
+/// regardless.
+class ScopedObject<T> extends _Dependent {
+  /// Creates a new [ScopedObject] with an [id] and an [instance].
+  ScopedObject({
+    required Object id,
+    required T instance,
+    DisposeFn<T>? dispose,
+    bool autoDispose = true,
+    bool owned = true,
+  })  : _id = id,
+        _instance = instance,
+        _ownership = owned
+            ? (autoDispose ? _LastListener<T>(dispose) : _Retained<T>(dispose))
+            : _CallerOwned<T>(autoDispose: autoDispose);
+
+  ScopedObject._({
+    required Object id,
+    required T instance,
+    required _RefScopeElement owner,
+    required _Ownership<T> ownership,
+  })  : _id = id,
+        _instance = instance,
+        _owner = owner,
+        _ownership = ownership;
+
+  final T _instance;
+
+  final Object _id;
+
+  /// Stays `late` because the public constructor leaves it uninitialized: an
+  /// object created that way can never participate in a scope.
+  late final _RefScopeElement _owner;
+
+  final _Ownership<T> _ownership;
+
+  /// Whether the instance should be disposed when all the widgets that have
+  /// access to the instance are unmounted.
+  bool get autoDispose => _ownership.autoDispose;
+
+  final _dependents = <_Dependent>{};
+
+  int _watchCount = 0;
+
+  _Lifecycle _lifecycle = _Lifecycle.live;
+
+  void _dispose() {
+    if (_lifecycle == _Lifecycle.disposed) return;
+
+    // An evicted dependency must remain usable by its dependents' disposers.
+    // The last dependent to release it completes the pending disposal.
+    if (_dependents.isNotEmpty) {
+      _lifecycle = _Lifecycle.awaitingDependentRelease;
+      return;
+    }
+
+    _lifecycle = _Lifecycle.disposed;
+
+    try {
+      if (_ownership case _ScopeOwned<T>(:final dispose)) {
+        // An explicit disposer also receives successfully created null values.
+        dispose?.call(_instance);
+        if (dispose == null) {
+          if (_instance case final Disposable d) {
+            d.dispose();
+          } else if (_instance case final ChangeNotifier c) {
+            // covers ChangeNotifier and ValueNotifier
+            c.dispose();
+          }
+        }
+      }
+    } finally {
+      _releaseDependencies();
+    }
+  }
+}
+
+/// A [ScopedObject] whose factory has not returned yet.
+final class _PendingScopedObject<T> extends _Dependent {
+  _PendingScopedObject({
+    required this.id,
+    required this.owner,
+    required this.ownership,
+  });
+
+  final Object id;
+
+  final _RefScopeElement owner;
+
+  final _Ownership<T> ownership;
+
+  /// Whether the factory is still running.
+  ///
+  /// Read from the creation zone so asynchronous work started by a factory
+  /// cannot register new dependencies after creation completed.
+  bool _active = true;
+
+  /// Turns this in-progress creation into a cached object.
+  ///
+  /// A pending object is only ever a dependent, never a dependency: it is not
+  /// in any scope cache, so moving its back-pointers is one-directional.
+  ScopedObject<T> complete(T instance) {
+    _active = false;
+
+    final object = ScopedObject<T>._(
+      id: id,
+      instance: instance,
+      owner: owner,
+      ownership: ownership,
+    );
+
+    for (final dependency in _dependencies) {
+      assert(
+        dependency._dependents.contains(this),
+        'A pending object must only be a dependent.',
+      );
+      dependency._dependents
+        ..remove(this)
+        ..add(object);
+      object._dependencies.add(dependency);
+    }
+    _dependencies.clear();
+
+    for (final entry in _lookupRegistrations.entries) {
+      for (final id in entry.value) {
+        final dependents = entry.key._lookupDependents[id];
+        assert(
+          dependents != null && dependents.contains(this),
+          'A pending object must be registered as a lookup dependent.',
+        );
+        dependents
+          ?..remove(this)
+          ..add(object);
+      }
+      object._lookupRegistrations[entry.key] = Set<Object>.of(entry.value);
+    }
+    _lookupRegistrations.clear();
+
+    return object;
+  }
+
+  /// Releases everything the failed factory acquired.
+  void abandon() {
+    _active = false;
+    _releaseDependencies();
+  }
+}
+
 ScopedObject<T> _createScopedObject<T>(
   _RefScopeElement owner, {
   required Object id,
   required T Function() create,
-  DisposeFn<T>? dispose,
-  bool autoDispose = true,
-  bool owned = true,
+  required _Ownership<T> ownership,
 }) {
-  final refObject = ScopedObject<T>._creating(
+  final pending = _PendingScopedObject<T>(
     id: id,
-    dispose: dispose,
-    autoDispose: autoDispose,
-    owned: owned,
-  ).._owner = owner;
+    owner: owner,
+    ownership: ownership,
+  );
 
-  _creatingRefs.add(refObject);
-
-  try {
-    refObject._instance = create();
-    return refObject;
-  } catch (_) {
-    // Dependencies acquired before a factory failed still retain their refs.
-    refObject._releaseDependencies();
-    rethrow;
-  } finally {
-    _creatingRefs.remove(refObject);
-  }
+  return runZoned(
+    () {
+      try {
+        // Only a completed entry enters the cache, including one whose value
+        // is legitimately `null`.
+        return pending.complete(create());
+      } catch (_) {
+        // Dependencies acquired before a factory failed still retain their
+        // refs.
+        pending.abandon();
+        rethrow;
+      }
+    },
+    zoneValues: {_creatingZoneKey: pending},
+  );
 }

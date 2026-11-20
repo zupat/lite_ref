@@ -9,7 +9,7 @@ typedef _Cache = Map<Object, ScopedObject<dynamic>>;
 /// When a ref starts resolving to another scope (an `onlyOverrides` scope
 /// gaining an override), the stale binding is released through this index so
 /// the abandoned instance can be disposed while its consumer stays mounted.
-final _consumerBindings = <Element, Map<Object, _RefScopeElement>>{};
+final _consumerBindings = Expando<Map<Object, _RefScopeElement>>();
 
 void _disposeSafely(ScopedObject<dynamic> ref) {
   try {
@@ -160,7 +160,7 @@ class _RefScopeElement extends InheritedElement {
   late final _evictedRefs = <ScopedObject<dynamic>>[];
 
   /// Objects whose factories resolved a ref ID through this scope.
-  late final _lookupDependents = <Object, Set<ScopedObject<dynamic>>>{};
+  late final _lookupDependents = <Object, Set<_Dependent>>{};
 
   _RefScopeElement? _deactivatedParent;
 
@@ -177,7 +177,7 @@ class _RefScopeElement extends InheritedElement {
   }
 
   void _addObjectDependency(
-    ScopedObject<dynamic> dependent,
+    _Dependent dependent,
     ScopedObject<dynamic> dependency,
   ) {
     if (!dependent._dependencies.add(dependency)) return;
@@ -187,7 +187,7 @@ class _RefScopeElement extends InheritedElement {
   }
 
   void _addLookupDependency(
-    ScopedObject<dynamic> dependent,
+    _Dependent dependent,
     Object id,
   ) {
     _lookupDependents.putIfAbsent(id, () => {}).add(dependent);
@@ -351,9 +351,17 @@ class _RefScopeElement extends InheritedElement {
         );
       }).toList();
 
-      final affectedScopes = _evictWithDependents(roots);
-      if (roots.isNotEmpty) {
-        _notifyAffectedScopes(scope, affectedScopes);
+      final plan = planEviction<ScopedObject<dynamic>, _RefScopeElement>(
+        owner: this,
+        roots: roots,
+        dependentsOf: (ref) =>
+            ref._dependents.whereType<ScopedObject<dynamic>>(),
+        ownerOf: (ref) => ref._owner,
+      );
+
+      _applyEviction(plan);
+      if (plan.toEvict.isNotEmpty) {
+        _notifyAffectedScopes(scope, plan.affectedScopes);
       }
     }
 
@@ -380,52 +388,39 @@ class _RefScopeElement extends InheritedElement {
       for (final ref in scope.overrides ?? const <IScopedRef<dynamic>>{})
         _idOf(ref),
     };
-    final roots = _cache.values.where((ref) {
-      if (changedIds.any((id) => _keyBelongsTo(ref._id, id))) return true;
-      return evictNonOverrides &&
-          !overrideIds.any((id) => _keyBelongsTo(ref._id, id));
-    }).toList();
+    final plan = planOverrideChange<ScopedObject<dynamic>, _RefScopeElement>(
+      owner: this,
+      cached: _cache.values,
+      keyMatches: (ref, id) => keyBelongsTo(ref._id, id),
+      changedIds: changedIds,
+      overrideIds: overrideIds,
+      evictNonOverrides: evictNonOverrides,
+      onlyOverridesChanged: onlyOverridesChanged,
+      lookupDependentsOf: (id) =>
+          (_lookupDependents[id] ?? const <_Dependent>{})
+              .whereType<ScopedObject<dynamic>>(),
+      allLookupDependents: _lookupDependents.values
+          .expand((refs) => refs)
+          .whereType<ScopedObject<dynamic>>(),
+      dependentsOf: (ref) => ref._dependents.whereType<ScopedObject<dynamic>>(),
+      ownerOf: (ref) => ref._owner,
+    );
 
-    // A changed lookup path also invalidates dependents even when the previous
-    // dependency was cached in an ancestor rather than in this scope.
-    for (final id in changedIds) {
-      roots.addAll(_lookupDependents[id] ?? const {});
-    }
-    if (onlyOverridesChanged) {
-      roots.addAll(_lookupDependents.values.expand((refs) => refs));
-    }
-
-    final affectedScopes = _evictWithDependents(roots);
-    _notifyAffectedScopes(oldWidget, affectedScopes);
+    _applyEviction(plan);
+    _notifyAffectedScopes(oldWidget, plan.affectedScopes);
   }
 
-  Set<_RefScopeElement> _evictWithDependents(
-    Iterable<ScopedObject<dynamic>> roots,
+  /// Applies [plan] by evicting every object it contains, in order.
+  ///
+  /// Dependents appear before their dependencies, including dependents in
+  /// descendant scopes: a lookup change invalidates every object that captured
+  /// the old value.
+  void _applyEviction(
+    EvictionPlan<ScopedObject<dynamic>, _RefScopeElement> plan,
   ) {
-    // Evict dependents before their dependencies. This includes dependents in
-    // descendant scopes because a lookup change invalidates every object that
-    // captured the old value.
-    final evicted = <ScopedObject<dynamic>>[];
-    final visited = Set<ScopedObject<dynamic>>.identity();
-
-    void collect(ScopedObject<dynamic> ref) {
-      if (!visited.add(ref)) return;
-      for (final dependent in List.of(ref._dependents)) {
-        collect(dependent);
-      }
-      evicted.add(ref);
-    }
-
-    for (final ref in roots) {
-      collect(ref);
-    }
-
-    final affectedScopes = <_RefScopeElement>{this};
-    for (final ref in evicted) {
+    for (final ref in plan.toEvict) {
       ref._owner._evict(ref);
-      affectedScopes.add(ref._owner);
     }
-    return affectedScopes;
   }
 
   void _notifyAffectedScopes(
@@ -466,51 +461,6 @@ class _RefScopeElement extends InheritedElement {
     _scheduleDisposalFlush();
   }
 
-  /// Ids of the refs whose resolved override changed.
-  ///
-  /// Overrides are compared by identity: two overrides for the same ref are
-  /// equal (`==`) by design, so only a new instance means a new override.
-  static Set<Object> _changedOverrideIds(
-    Set<IScopedRef<dynamic>>? oldOverrides,
-    Set<IScopedRef<dynamic>>? newOverrides,
-  ) {
-    final oldById = <Object, IScopedRef<dynamic>>{
-      for (final ref in oldOverrides ?? const <IScopedRef<dynamic>>{})
-        _idOf(ref): ref,
-    };
-    final newById = <Object, IScopedRef<dynamic>>{
-      for (final ref in newOverrides ?? const <IScopedRef<dynamic>>{})
-        _idOf(ref): ref,
-    };
-
-    final changed = <Object>{};
-
-    for (final entry in newById.entries) {
-      final previous = oldById[entry.key];
-      if (previous == null || !identical(previous, entry.value)) {
-        changed.add(entry.key);
-      }
-    }
-
-    for (final id in oldById.keys) {
-      if (!newById.containsKey(id)) changed.add(id);
-    }
-
-    return changed;
-  }
-
-  static Object _idOf(IScopedRef<dynamic> ref) => switch (ref) {
-        ScopedRef() => ref._id,
-        ScopedFamilyRef() => ref._id,
-      };
-
-  /// Cache keys are `_id` for a [ScopedRef] and `(_id, family)` for a
-  /// [ScopedFamilyRef]. The family argument may be `null`.
-  static bool _keyBelongsTo(Object key, Object id) {
-    if (key == id) return true;
-    return key is (Object, Object?) && key.$1 == id;
-  }
-
   @override
   void removeDependent(Element dependent) {
     // Bindings are released eagerly (instead of only when the dependent is
@@ -518,7 +468,16 @@ class _RefScopeElement extends InheritedElement {
     // it would otherwise keep its bindings in the old scope forever.
     final refs = _autoDisposeBindings.remove(dependent);
     _listeningElements.remove(dependent);
-    _consumerBindings.remove(dependent);
+
+    // Only this scope's bindings are stale. Bindings held by other scopes for
+    // the same element must survive so a later scope switch can release them.
+    final bindings = _consumerBindings[dependent];
+    if (bindings != null) {
+      bindings.removeWhere((_, scope) => identical(scope, this));
+      if (bindings.isEmpty) {
+        _consumerBindings[dependent] = null;
+      }
+    }
 
     if (refs != null) {
       for (final ref in refs) {
