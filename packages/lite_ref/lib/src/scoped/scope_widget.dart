@@ -83,22 +83,22 @@ class LiteRefScope extends InheritedWidget {
     // is in the overrides list, if not, we need to visit all ancestors
     // until we find an element with the ref or one that is not onlyOverride
     if (refScopeElement.scope.onlyOverrides) {
-      traversed?.add(refScopeElement);
-
       if (refScopeElement.scope.overrides?.contains(ref) ?? false) {
         return refScopeElement;
       }
+
+      traversed?.add(refScopeElement);
 
       var parentElement = refScopeElement._parentScope;
 
       while (parentElement != null) {
         if (!parentElement.scope.onlyOverrides) break;
 
-        traversed?.add(parentElement);
-
         if (parentElement.scope.overrides?.contains(ref) ?? false) {
           break;
         }
+
+        traversed?.add(parentElement);
 
         parentElement = parentElement._parentScope;
       }
@@ -151,7 +151,8 @@ class _RefScopeElement extends InheritedElement {
   /// overrides change.
   late final _listeningElements = <Element>{};
 
-  late final _oldRefs = <ScopedObject<dynamic>>[];
+  /// Cache keys whose factories are currently running in this scope.
+  late final _creatingKeys = <Object>{};
 
   /// Refs whose last consumer may have gone away this frame.
   late final _pendingDisposals = <ScopedObject<dynamic>>[];
@@ -169,11 +170,12 @@ class _RefScopeElement extends InheritedElement {
   bool _flushingDisposals = false;
 
   void _addDependent(Element element) {
-    if (_listeningElements.add(element)) {
-      // make this child widget depend on this element
-      // so we get notified when it is deactivated
-      element.dependOnInheritedElement(this);
-    }
+    if (_listeningElements.contains(element)) return;
+
+    // Make this child widget depend on this element before recording it so a
+    // throwing lookup (e.g. from State.initState) does not poison future binds.
+    element.dependOnInheritedElement(this);
+    _listeningElements.add(element);
   }
 
   void _addObjectDependency(
@@ -329,27 +331,24 @@ class _RefScopeElement extends InheritedElement {
   @override
   void deactivate() {
     _deactivatedParent = _parentScope;
-
-    // if this widget gets replaced by another LiteRefScope
-    // (eg: hot-reload when it or one of its ancestors has a UniqueKey).
-    // Keep a snapshot of all Refs in our cache so we don't dispose refs being
-    // used by its replacement. Keep the objects themselves to preserve their
-    // dependency relationships if this scope unmounts.
-    _oldRefs.addAll(_cache.values);
     super.deactivate();
   }
 
   @override
   void activate() {
     super.activate();
-    _oldRefs.clear();
 
     if (!identical(_deactivatedParent, _parentScope)) {
-      final roots = _cache.values.where((ref) {
-        return ref._dependencies.any(
-          (dependency) => !identical(dependency._owner, this),
-        );
-      }).toList();
+      final roots = <ScopedObject<dynamic>>[
+        ..._cache.values.where((ref) {
+          return ref._dependencies.any(
+            (dependency) => !identical(dependency._owner, this),
+          );
+        }),
+        ..._lookupDependents.values
+            .expand((refs) => refs)
+            .whereType<ScopedObject<dynamic>>(),
+      ];
 
       final plan = planEviction<ScopedObject<dynamic>, _RefScopeElement>(
         owner: this,
@@ -495,11 +494,7 @@ class _RefScopeElement extends InheritedElement {
 
   @override
   void unmount() {
-    // this shouldn't be necessary but it's harmless
-    // we should be able to just use _oldRefs.
-    final toBeDisposed = List<ScopedObject<dynamic>>.of(
-      _oldRefs.isEmpty ? _cache.values : _oldRefs,
-    );
+    final toBeDisposed = List<ScopedObject<dynamic>>.of(_cache.values);
     final evicted = List<ScopedObject<dynamic>>.of(_evictedRefs);
 
     try {
@@ -516,11 +511,11 @@ class _RefScopeElement extends InheritedElement {
       // coverage:ignore-end
     } finally {
       _cache.clear();
-      _oldRefs.clear();
       _evictedRefs.clear();
       _pendingDisposals.clear();
       _autoDisposeBindings.clear();
       _listeningElements.clear();
+      _creatingKeys.clear();
       _lookupDependents.clear();
       _deactivatedParent = null;
       super.unmount();

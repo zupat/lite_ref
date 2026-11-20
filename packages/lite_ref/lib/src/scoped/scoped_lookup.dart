@@ -58,8 +58,32 @@ T _resolveScoped<T>({
     return existing._instance as T;
   }
 
+  if (element._creatingKeys.contains(cacheKey)) {
+    throw StateError(
+      'Circular or re-entrant dependency detected while creating '
+      '${ref.runtimeType}.',
+    );
+  }
+
+  // Register element dependencies before invoking the factory so an invalid
+  // listening lookup (e.g. from State.initState) fails before creating an
+  // orphaned object and acquiring dependencies.
+  if (listen && creating == null) {
+    final consumer = context as Element;
+    for (final traversed in traversedScopes) {
+      traversed._addDependent(consumer);
+    }
+    element._addDependent(consumer);
+  }
+
   final effective = element.scope.overrides?.lookup(ref) ?? ref;
-  final object = create(element, effective);
+  element._creatingKeys.add(cacheKey);
+  final ScopedObject<T> object;
+  try {
+    object = create(element, effective);
+  } finally {
+    element._creatingKeys.remove(cacheKey);
+  }
   bindIfNeeded(object);
   element._cache[object._id] = object;
   return object._instance;

@@ -75,12 +75,21 @@ One function serves both ref types. Parameters are the context, the descriptor,
 a bare `lookupId`, a `cacheKey`, a `listen` flag, and a `create` callback that
 knows how to build the object for the *effective* ref.
 
-1. Find the serving element with `LiteRefScope._of`, which also returns any
+1. Find the serving element with `LiteRefScope._of`, which also returns the
    `onlyOverrides` scopes traversed along the way.
 2. If the cache has the key, bind the listener to the existing object and return
    its instance.
-3. Otherwise resolve `effective = overrides?.lookup(ref) ?? ref`, build the
-   object, bind, cache it, and return.
+3. Otherwise, before creating, reject reentrancy: if this scope's `_creatingKeys`
+   already contains the key, a factory is building this exact ref right now, so
+   throw a `StateError` (a direct, indirect, or cross-scope cycle would otherwise
+   overflow the stack or overwrite the cache slot).
+4. If the caller is a listening widget (not a nested factory), register its
+   element dependency on the traversed and serving scopes *before* invoking the
+   factory, so a throwing `dependOnInheritedElement` (e.g. from `State.initState`)
+   fails before an orphaned object is created.
+5. Resolve `effective = overrides?.lookup(ref) ?? ref`, build the object (marking
+   and clearing the key in `_creatingKeys` around the call), bind, cache it, and
+   return.
 
 Binding has three modes, distinguished by who is asking:
 
@@ -94,12 +103,15 @@ flowchart TD
     A["of(context, family?)"] --> B["find scope via LiteRefScope._of<br/>(walk onlyOverrides ancestors)"]
     B --> C{"cache hit?"}
     C -- yes --> D["bindIfNeeded(existing)"]
-    C -- no --> E["effective = overrides?.lookup(ref) ?? ref"]
-    E --> F["create(element, effective)"]
-    F --> G["_createRefObject → _createScopedObject"]
-    G --> H["cache[object._id] = object"]
-    D --> I["return object._instance"]
-    H --> I
+    C -- no --> E{"creatingKeys has key?<br/>(reentrancy)"}
+    E -- yes --> F["throw StateError"]
+    E -- no --> G["register element dependents<br/>(if listen && not creating)"]
+    G --> H["effective = overrides?.lookup(ref) ?? ref"]
+    H --> I["create(element, effective)<br/>(add/remove key in _creatingKeys)"]
+    I --> J["_createRefObject → _createScopedObject"]
+    J --> K["cache[object._id] = object"]
+    D --> L["return object._instance"]
+    K --> L
 ```
 
 The `create` callback is what makes the unified resolver safe: `ScopedRef` casts
@@ -236,7 +248,8 @@ the same).
 
 Cache order is insertion order (`_Cache` is a `Map`), and the dependency is
 created during the dependent's factory, so the cache is `[db, repo]`.
-`unmount()` disposes `_cache.values` in that order:
+`unmount()` disposes `_cache.values` (plus any `_evictedRefs` still pending) in
+that order:
 
 1. `db._dispose()` → `db._dependents == {repo}` → `live →
    awaitingDependentRelease`, returns. `db.close()` is **not** called.
@@ -381,6 +394,8 @@ Each `_RefScopeElement` keeps:
 
 - `_cache` — key → `ScopedObject`.
 - `_listeningElements` — widgets that read a ref through this scope.
+- `_creatingKeys` — cache keys whose factories are currently running in this
+  scope, used to reject re-entrant creation.
 - `_autoDisposeBindings` — element → set of objects it keeps alive.
 - `_consumerBindings` — a global `Expando<Map>` keyed by element, mapping ref
   key → the scope that currently serves it. Needed because a scope switch (an
@@ -496,21 +511,29 @@ flowchart TD
 
 `activate()` reuses the same split with `planEviction` (it has no override-change
 inputs, so it computes its own roots) and skips notification when `plan.toEvict`
-is empty. Moving the *what* into the pure planners and leaving the *how* in the
-element is what makes invalidation unit-testable without a widget tree.
+is empty. Its roots include `_lookupDependents`, not just `_cache.values`, so a
+scope moved with a `GlobalKey` also evicts descendant objects that resolved an
+ancestor ref through it, even when the scope itself held nothing. Moving the
+*what* into the pure planners and leaving the *how* in the element is what makes
+invalidation unit-testable without a widget tree.
 
 ## `onlyOverrides` traversal
 
 A `LiteRefScope(onlyOverrides: true)` serves only refs present in its `overrides`
 set. `_of` walks up through `onlyOverrides` ancestors until it finds one that
-serves the ref, recording the traversed scopes so their override changes can
-still notify this consumer. The root scope must have `onlyOverrides: false`.
+serves the ref, recording the *passthrough* scopes (those skipped because they
+lack an override) so their override changes can still notify this consumer. The
+serving scope itself is not recorded as traversed. The root scope must have
+`onlyOverrides: false`.
 
 ## Invariants to preserve
 
 - A pending object is only a dependent, never a dependency, and never in a cache.
 - Only a completed object enters the cache — including one whose value is
   legitimately `null`.
+- A cache key whose factory is running is never resolved again: `_creatingKeys`
+  turns any re-entrant or circular lookup into a `StateError` rather than a stack
+  overflow or a silently overwritten slot.
 - Family cache keys are `(_id, family)`; lookup-dependency keys are bare `_id`.
 - Caller-owned values are never disposed by a scope, but their dependencies are
   still released.
