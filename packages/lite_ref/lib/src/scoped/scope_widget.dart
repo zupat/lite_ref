@@ -351,9 +351,17 @@ class _RefScopeElement extends InheritedElement {
         );
       }).toList();
 
-      final affectedScopes = _applyEviction(_evictionOrder(roots));
-      if (roots.isNotEmpty) {
-        _notifyAffectedScopes(scope, affectedScopes);
+      final plan = planEviction<ScopedObject<dynamic>, _RefScopeElement>(
+        owner: this,
+        roots: roots,
+        dependentsOf: (ref) =>
+            ref._dependents.whereType<ScopedObject<dynamic>>(),
+        ownerOf: (ref) => ref._owner,
+      );
+
+      _applyEviction(plan);
+      if (plan.toEvict.isNotEmpty) {
+        _notifyAffectedScopes(scope, plan.affectedScopes);
       }
     }
 
@@ -380,33 +388,39 @@ class _RefScopeElement extends InheritedElement {
       for (final ref in scope.overrides ?? const <IScopedRef<dynamic>>{})
         _idOf(ref),
     };
-    final roots = _rootsForOverrideChange(
+    final plan = planOverrideChange<ScopedObject<dynamic>, _RefScopeElement>(
+      owner: this,
       cached: _cache.values,
+      keyMatches: (ref, id) => keyBelongsTo(ref._id, id),
       changedIds: changedIds,
       overrideIds: overrideIds,
       evictNonOverrides: evictNonOverrides,
-      lookupDependents: _lookupDependents,
       onlyOverridesChanged: onlyOverridesChanged,
+      lookupDependentsOf: (id) =>
+          (_lookupDependents[id] ?? const <_Dependent>{})
+              .whereType<ScopedObject<dynamic>>(),
+      allLookupDependents: _lookupDependents.values
+          .expand((refs) => refs)
+          .whereType<ScopedObject<dynamic>>(),
+      dependentsOf: (ref) => ref._dependents.whereType<ScopedObject<dynamic>>(),
+      ownerOf: (ref) => ref._owner,
     );
 
-    final affectedScopes = _applyEviction(_evictionOrder(roots));
-    _notifyAffectedScopes(oldWidget, affectedScopes);
+    _applyEviction(plan);
+    _notifyAffectedScopes(oldWidget, plan.affectedScopes);
   }
 
-  /// Applies an eviction order produced by [_evictionOrder].
+  /// Applies [plan] by evicting every object it contains, in order.
   ///
   /// Dependents appear before their dependencies, including dependents in
   /// descendant scopes: a lookup change invalidates every object that captured
   /// the old value.
-  Set<_RefScopeElement> _applyEviction(
-    Iterable<ScopedObject<dynamic>> evicted,
+  void _applyEviction(
+    EvictionPlan<ScopedObject<dynamic>, _RefScopeElement> plan,
   ) {
-    final affectedScopes = <_RefScopeElement>{this};
-    for (final ref in evicted) {
+    for (final ref in plan.toEvict) {
       ref._owner._evict(ref);
-      affectedScopes.add(ref._owner);
     }
-    return affectedScopes;
   }
 
   void _notifyAffectedScopes(

@@ -49,8 +49,8 @@ library (`scoped.dart`) so they can share private names:
 | `scoped_family_ref.dart` | `ScopedFamilyRef<T, F>` descriptor |
 | `scoped_lookup.dart` | `_resolveScoped`, the single lookup path, plus `_creationContext` |
 | `scoped_object.dart` | `_Ownership`, `_Lifecycle`, `_Dependent`, `ScopedObject`, `_PendingScopedObject`, `_createScopedObject` |
-| `scoped_analysis.dart` | pure invalidation decisions: `_changedOverrideIds`, `_rootsForOverrideChange`, `_evictionOrder` |
-| `eviction.dart` | generic pure `evictionOrder` (imported, not a part, so it is unit-testable alone) |
+| `scoped_analysis.dart` | lite_ref-specific pure decisions: `_changedOverrideIds`, `_idOf` |
+| `eviction.dart` | generic pure planners — `evictionOrder`, `keyBelongsTo`, `EvictionPlan`, `planEviction`, `planOverrideChange` (imported, not a part, so widget-free testable) |
 | `scope_widget.dart` | `LiteRefScope` (the `InheritedWidget`) and `_RefScopeElement` (all Flutter effects) |
 
 `src/ref.dart` holds the `Ref` static factories (`scoped`, `scopedFamily`, and
@@ -202,32 +202,35 @@ first so a widget moved with a `GlobalKey` in the same frame keeps its instance.
 
 ## Invalidation and eviction
 
-When a scope's `overrides` change (or `onlyOverrides` toggles), `updated` runs:
+Invalidation is a pure "decide, then apply" split: the planners in `eviction.dart`
+return an `EvictionPlan`, and the element only applies it.
 
 ```mermaid
 flowchart TD
     A["updated(oldWidget)"] --> B["_changedOverrideIds (identity)"]
-    B --> C["_rootsForOverrideChange (pure)"]
-    C --> D["_evictionOrder → evictionOrder<br/>(pure, dependents first)"]
-    D --> E["_applyEviction (mutate cache/bindings)"]
-    E --> F["_notifyAffectedScopes (rebuild listeners)"]
+    B --> C["planOverrideChange (pure)<br/>→ EvictionPlan"]
+    C --> D["_applyEviction(plan)<br/>(mutate cache/bindings)"]
+    D --> E["_notifyAffectedScopes<br/>(rebuild listeners)"]
 ```
 
 1. `_changedOverrideIds` — ids whose override was added, removed, or replaced
    (identity comparison).
-2. `_rootsForOverrideChange` — a pure function selecting the cached objects to
-   evict: objects whose key matches a changed id; if switching to
-   `onlyOverrides`, everything not in the override set; plus dependents whose
-   factory looked the changed id up through this scope.
-3. `_evictionOrder` → `evictionOrder` — a generic pure traversal returning
-   dependents before their dependencies, visited once, cycle-safe.
-4. `_applyEviction` — mutates the cache/`_autoDisposeBindings`, queues the
-   objects for disposal.
-5. `_notifyAffectedScopes` — rebuilds listening elements in every scope that lost
-   a cached object, including `autoDispose: false` consumers.
+2. `planOverrideChange` — a generic pure planner that selects the objects to
+   evict (keys matching a changed id; if switching to `onlyOverrides`, everything
+   not in the override set; plus lookup dependents of changed ids) and orders
+   them dependents-first via `evictionOrder`. It returns an `EvictionPlan` with
+   `toEvict` (ordered) and `affectedScopes` (`{owner} ∪ owners(toEvict)`).
+   `keyBelongsTo` matches cache keys against bare ref ids.
+3. `_applyEviction(plan)` — a dumb applier: evicts each object in `plan.toEvict`
+   (removes it from the cache and bindings, queues it for disposal). It computes
+   nothing.
+4. `_notifyAffectedScopes` — rebuilds listening elements in every scope in
+   `plan.affectedScopes`, including `autoDispose: false` consumers.
 
-The split between 2–3 (pure) and 4–5 (effects) is what makes eviction ordering
-unit-testable without a widget tree.
+`activate()` reuses the same split with `planEviction` (it has no override-change
+inputs, so it computes its own roots) and skips notification when `plan.toEvict`
+is empty. Moving the *what* into the pure planners and leaving the *how* in the
+element is what makes invalidation unit-testable without a widget tree.
 
 ## `onlyOverrides` traversal
 
@@ -254,7 +257,8 @@ still notify this consumer. The root scope must have `onlyOverrides: false`.
   `scoped lifecycle regressions` group.
 - `test/public_api_test.dart` — imports only `lib/lite_ref.dart`; a canary for
   accidental library-private coupling.
-- `test/src/scoped/eviction_test.dart` — widget-free tests of `evictionOrder`.
+- `test/src/scoped/eviction_test.dart` — widget-free tests of the pure planners
+  (`evictionOrder`, `keyBelongsTo`, `planEviction`, `planOverrideChange`).
 
 When you add a private state that is unreachable by construction, coverage will
 flag it; exercise it from a test or mark it `// coverage:ignore` deliberately.
