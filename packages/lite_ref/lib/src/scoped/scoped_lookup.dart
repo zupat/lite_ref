@@ -32,6 +32,11 @@ T _resolveScoped<T>({
     // factory's object instead of binding the consuming element.
     if (creating != null) {
       element._addObjectDependency(creating, object);
+      // _addObjectDependency says "I use this instance."
+      // _addLookupDependency says "I didn't use an instance of yours, but I
+      // resolved through you, so tell me (or evict me) if your overrides
+      // change." It exists so a scope that gains/loses an override can
+      // invalidate objects that were built against its ancestor.
       for (final traversed in traversedScopes) {
         traversed._addLookupDependency(creating, lookupId);
       }

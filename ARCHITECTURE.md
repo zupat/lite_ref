@@ -106,6 +106,64 @@ The `create` callback is what makes the unified resolver safe: `ScopedRef` casts
 `effective` to `ScopedRef<T>`, `ScopedFamilyRef` to `ScopedFamilyRef<T, F>`, so
 each keeps its own `_createRefObject`.
 
+<details>
+<summary>What <code>effective = overrides?.lookup(ref) ?? ref</code> actually does</summary>
+
+That line picks **which version of the ref to build** — the override stored in
+this scope, or the original ref. It is not reading a value: it runs only on a
+cache miss, before any `ScopedObject` exists for the key.
+
+```dart
+final effective = element.scope.overrides?.lookup(ref) ?? ref;
+```
+
+- `element.scope` — the `LiteRefScope` that serves the ref, already chosen by
+  `_of`.
+- `.overrides` — a `Set<IScopedRef<dynamic>>?`, `null` when the scope declares
+  none.
+- `.lookup(ref)` — this is `Set.lookup`, not a map lookup: it returns the
+  *element already in the set* that is equal to `ref`, or `null`. It is the
+  "give me the stored object, not just a bool" sibling of `contains`.
+- `?? ref` — no override set, or no matching entry → use the ref itself.
+
+### Why `lookup` finds the right override
+
+Equality is by `_id`, and `overrideWith` preserves it
+(`ScopedRef._(create, _id, ...)`), so an override is "the same ref with a
+different recipe". `Set.lookup` uses `==`/`hashCode`, so it returns that
+override instance.
+
+### What `effective` is used for
+
+It goes straight into `create(element, effective)`, whose concrete callback
+casts it back and calls its `_createRefObject`:
+
+```dart
+create: (element, effective) {
+  return (effective as ScopedRef<T>)._createRefObject(element);
+},
+```
+
+So `effective` selects the **factory, disposer, and `autoDispose` policy**. It
+does not select the cache key: the built object keeps the same `_id`, so
+`element._cache[object._id] = object` still uses one slot per ref per scope.
+
+### Example
+
+| Scope | `overrides?.lookup(modeRef)` | Built by |
+| --- | --- | --- |
+| no overrides | `null` → `?? ref` | the ref's factory (`ThemeMode.light`) |
+| `overrides: {modeRef.overrideWith((_) => ThemeMode.dark)}` | the override | the override's factory (`ThemeMode.dark`) |
+
+Resolution therefore has two decisions: `_of` picks *which scope* serves the
+ref (using `overrides.contains(ref)`, also id equality), then `lookup` picks
+*which definition* that scope builds.
+
+**Short version:** it is "find the override for this ref id in this scope, or
+fall back to the ref itself" — choosing a recipe, not an instance.
+
+</details>
+
 ## Ownership and lifecycle
 
 Ownership is a sealed hierarchy (`_Ownership<T>`) whose variants are the only
