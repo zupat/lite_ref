@@ -192,16 +192,21 @@ Result: `repo`'s disposer observes a usable `db`, and `db` is torn down last.
 Without the intermediate state, unmount order (dependency before dependent)
 would close `db` underneath `repo.flush()`.
 
-### Scenario: cross-scope eviction
+### Scenario: eviction across scopes
 
-The same state is reachable through eviction. Dependency `db` is cached in a
-parent scope, dependent `repo` in a child scope; an override change evicts
-both. `_applyEviction` queues each object on **its own owner's** `_evictedRefs`,
-and each scope flushes independently in the post-frame phase. If the parent
-drains its queue while the child's `repo` is still queued (for example, the
-parent was already mid-flush), `db._dispose()` still sees `repo` in
-`_dependents` → `awaitingDependentRelease`; the child's later flush releases
-`repo` and completes `db`'s disposal.
+Eviction does *not* normally reach this state, even when the dependency and
+dependent live in different scopes. `evictionOrder` emits dependents first, and
+`_applyEviction` walks the plan in that order, queueing each object on its own
+owner's `_evictedRefs`. The dependent's scope therefore registers its flush
+callback first, so the dependent is disposed first and releases the dependency
+before the dependency's queue is drained. A cross-scope eviction mirrors the
+single-scope assertion: the dependent's disposer still sees a live dependency.
+
+The state is the backstop for any forced disposal that is *not* ordered this
+way. Scope unmount is the concrete one above: cache order is insertion order,
+so dependencies come before the dependents that created them. Whenever such a
+path reaches a dependency first, the guard parks it in
+`awaitingDependentRelease` instead of tearing it down under a live dependent.
 
 **Short version:** any `Ref.scoped` whose factory resolves another scoped ref,
 with both entries dying in the same scope teardown, deterministically passes
@@ -243,6 +248,74 @@ flowchart TD
     H --> I["release acquired dependencies"]
     I --> J["rethrow"]
 ```
+
+<details>
+<summary>Why <code>_PendingScopedObject</code> is needed</summary>
+
+The root cause is that `ScopedObject._instance` is `final` and has no value
+until `create()` returns. A `ScopedObject` cannot exist before its value does,
+yet the factory may already be resolving dependencies, and those dependencies
+need a dependent identity *right now* (`_addObjectDependency` adds an entry to
+`dependency._dependents` and bumps `_watchCount`). `_PendingScopedObject` is
+that identity: it carries the creation-time data that *is* known (`id`, `owner`,
+`ownership`) and the dependent-side bookkeeping (`_dependencies`,
+`_lookupRegistrations`), but no instance.
+
+### Scenario: a factory that resolves a ref and then throws
+
+```dart
+final configRef = Ref.scoped((_) => loadConfig());
+final clientRef = Ref.scoped((ctx) {
+  final config = configRef(ctx);         // records pending as config's dependent
+  if (config.invalid) throw StateError('bad config');
+  return Client(config);
+});
+```
+
+`config` is created and enters the cache normally. `clientRef` never does.
+
+1. While `create()` runs, `_creationContext()` reads the zone value and returns
+   the pending object. Lookups inside the factory record it as the dependent,
+   not the consuming `Element`.
+2. If the factory throws, `pending.abandon()` releases exactly those edges:
+   `config._dependents` drops the pending object and `_watchCount` decrements,
+   so an `autoDispose` config is not leaked by a consumer that never existed.
+   The exception is rethrown and the cache is untouched.
+3. If the factory succeeds, `pending.complete(instance)` constructs the real
+   `ScopedObject` and rewrites every dependency's `_dependents` entry and every
+   lookup registration from `pending` to the new object, then clears the
+   pending side.
+
+The fix-up is one-directional because a pending object is never in a cache, so
+no one can hold *it* as a dependency; only the pending object's outbound
+references need moving. That is also why `complete()` can assert that pending
+appears in each dependency's `_dependents` but never the reverse.
+
+### Why not create the object first and cache it after?
+
+Because a half-built object must never be observable. `_resolveScoped` inserts
+into `_cache` only after `create(...)` returns
+(`element._cache[object._id] = object`), and a throwing factory leaves no
+entry. Disposal is likewise safe: `_dispose()` operates on a `ScopedObject`
+whose `_instance` is guaranteed initialized; a pending object is not a
+`ScopedObject` and has no lifecycle or disposer to run.
+
+### Why the `_active` flag
+
+Zone values follow asynchronous continuations. Without `_active`, a
+`Future.then` scheduled inside a factory could resolve a ref after the factory
+already completed or failed, attaching a dependency to an object that is
+already live (or disposed). `_creationContext()` returns `null` once
+`complete()` or `abandon()` clears the flag, so a late lookup is treated as an
+ordinary one (cached hit, or a fresh creation) instead of mutating the finished
+object's dependency graph.
+
+**Short version:** `_PendingScopedObject` lets a factory acquire and release
+dependencies before its value exists, keeps failed creations out of the cache,
+and moves the surviving edges onto the real `ScopedObject` when creation
+succeeds.
+
+</details>
 
 ## Binding and auto-dispose
 
