@@ -79,7 +79,7 @@ knows how to build the object for the *effective* ref.
    `onlyOverrides` scopes traversed along the way.
 2. If the cache has the key, bind the listener to the existing object and return
    its instance.
-3. Otherwise, before creating, reject reentrancy: if this scope's `_creatingKeys`
+3. Otherwise, before creating, reject re-entrancy: if this scope's `_creatingKeys`
    already contains the key, a factory is building this exact ref right now, so
    throw a `StateError` (a direct, indirect, or cross-scope cycle would otherwise
    overflow the stack or overwrite the cache slot).
@@ -103,7 +103,7 @@ flowchart TD
     A["of(context, family?)"] --> B["find scope via LiteRefScope._of<br/>(walk onlyOverrides ancestors)"]
     B --> C{"cache hit?"}
     C -- yes --> D["bindIfNeeded(existing)"]
-    C -- no --> E{"creatingKeys has key?<br/>(reentrancy)"}
+    C -- no --> E{"creatingKeys has key?<br/>(re-entrancy)"}
     E -- yes --> F["throw StateError"]
     E -- no --> G["register element dependents<br/>(if listen && not creating)"]
     G --> H["effective = overrides?.lookup(ref) ?? ref"]
