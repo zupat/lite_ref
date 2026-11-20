@@ -2466,6 +2466,285 @@ void main() {
         expect(calls, 2);
       },
     );
+
+    testWidgets(
+      'moving an intermediate onlyOverrides scope rebuilds descendant '
+      'dependencies from the new ancestor',
+      (tester) async {
+        final current = ValueNotifier(1);
+        final first = _Resource();
+        final second = _Resource();
+        final resourceRef = Ref.scoped<_Resource>(
+          (_) => throw StateError('A parent override is required'),
+        );
+        final dependentRef = Ref.scoped<_Dependent>(
+          (_) => throw StateError('An inner override is required'),
+        );
+        final dependentOverride = dependentRef.overrideWith(
+          (ctx) => _Dependent(resourceRef(ctx)),
+        );
+
+        final movedSubtree = LiteRefScope(
+          key: GlobalKey(),
+          onlyOverrides: true,
+          child: LiteRefScope(
+            onlyOverrides: true,
+            overrides: {dependentOverride},
+            child: Builder(
+              builder: (context) {
+                final dependent = dependentRef(context);
+                return Text('${identityHashCode(dependent.resource)}');
+              },
+            ),
+          ),
+        );
+
+        Widget slot(int id, _Resource resource) {
+          return LiteRefScope(
+            key: ValueKey(id),
+            overrides: {resourceRef.overrideWith((_) => resource)},
+            child: movedSubtree,
+          );
+        }
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: ListenableBuilder(
+                listenable: current,
+                builder: (context, _) {
+                  return Column(
+                    children: [
+                      if (current.value == 1) slot(1, first),
+                      if (current.value == 2) slot(2, second),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        expect(find.text('${identityHashCode(first)}'), findsOneWidget);
+
+        current.value = 2;
+        await tester.pumpAndSettle();
+
+        expect(find.text('${identityHashCode(second)}'), findsOneWidget);
+        expect(first.disposed, isTrue);
+        expect(second.disposed, isFalse);
+      },
+    );
+
+    testWidgets(
+      'a failed binding in initState does not leak the created object '
+      'or wedge its dependencies',
+      (tester) async {
+        final resource = _Resource();
+        final disposedDependents = <_Dependent>[];
+        var dependentCreations = 0;
+        final resourceRef = Ref.scoped((_) => resource);
+        final dependentRef = Ref.scoped<_Dependent>(
+          (ctx) {
+            dependentCreations++;
+            return _Dependent(resourceRef(ctx));
+          },
+          dispose: disposedDependents.add,
+        );
+        Object? initError;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: Column(
+                children: [
+                  Builder(
+                    builder: (context) {
+                      resourceRef(context);
+                      return const SizedBox.shrink();
+                    },
+                  ),
+                  _LookupInInitState(
+                    onInit: (context) {
+                      try {
+                        dependentRef(context);
+                      } catch (error) {
+                        initError = error;
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        expect(initError, isA<FlutterError>());
+
+        await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+        await tester.pumpAndSettle();
+
+        expect(disposedDependents, hasLength(dependentCreations));
+        expect(resource.disposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'a failed dependOnInheritedElement in initState does not prevent '
+      'later auto-dispose bindings in build',
+      (tester) async {
+        final disposed = <int>[];
+        final show = ValueNotifier(true);
+        final countRef = Ref.scoped((_) => 1, dispose: disposed.add);
+        Object? initError;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: ListenableBuilder(
+                listenable: show,
+                builder: (context, _) {
+                  if (!show.value) return const Text('hidden');
+                  return _LookupInInitState(
+                    onInit: (context) {
+                      try {
+                        countRef(context);
+                      } catch (error) {
+                        initError = error;
+                      }
+                    },
+                    builder: (context) => Text('${countRef(context)}'),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        expect(initError, isA<FlutterError>());
+        expect(find.text('1'), findsOneWidget);
+
+        show.value = false;
+        await tester.pumpAndSettle();
+
+        expect(find.text('hidden'), findsOneWidget);
+        expect(disposed, [1]);
+      },
+    );
+
+    testWidgets(
+      'refs initialized during a descendant deactivate are disposed '
+      'when the scope unmounts',
+      (tester) async {
+        final first = _Resource();
+        final second = _Resource();
+        final firstRef = Ref.scoped((_) => first);
+        final secondRef = Ref.scoped((_) => second);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: _ReadOnDeactivate(
+                onBuild: firstRef.call,
+                onDeactivate: secondRef.read,
+              ),
+            ),
+          ),
+        );
+
+        await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+        await tester.pumpAndSettle();
+
+        expect(first.disposed, isTrue);
+        expect(second.disposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'toggling onlyOverrides from true to false does not recreate '
+      'dependents of unchanged overrides',
+      (tester) async {
+        final onlyOverrides = ValueNotifier(true);
+        var aCreations = 0;
+        var bCreations = 0;
+        final disposedB = <int>[];
+        final aRef = Ref.scoped((_) => 0);
+        final bRef = Ref.scoped((_) => 0, dispose: disposedB.add);
+        final aOverride = aRef.overrideWith((_) => ++aCreations);
+        final bOverride = bRef.overrideWith((ctx) {
+          aRef(ctx);
+          return ++bCreations;
+        });
+        final consumer = Builder(
+          builder: (context) => Text('b:${bRef(context)}'),
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: ListenableBuilder(
+                listenable: onlyOverrides,
+                builder: (context, _) {
+                  return LiteRefScope(
+                    onlyOverrides: onlyOverrides.value,
+                    overrides: {aOverride, bOverride},
+                    child: consumer,
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+
+        expect(find.text('b:1'), findsOneWidget);
+        expect(aCreations, 1);
+        expect(bCreations, 1);
+
+        onlyOverrides.value = false;
+        await tester.pumpAndSettle();
+
+        expect(find.text('b:1'), findsOneWidget);
+        expect(aCreations, 1);
+        expect(bCreations, 1);
+        expect(disposedB, isEmpty);
+      },
+    );
+
+    testWidgets(
+      're-entrant creation of the same ref throws a StateError instead of '
+      'overwriting the cache and leaking the inner object',
+      (tester) async {
+        final inner = _Resource();
+        final outer = _Resource();
+        var depth = 0;
+        late final ScopedRef<_Resource> reentrantRef;
+        reentrantRef = Ref.scoped<_Resource>((ctx) {
+          if (depth++ == 0) {
+            reentrantRef(ctx);
+            return outer;
+          }
+          return inner;
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LiteRefScope(
+              child: Builder(
+                builder: (context) {
+                  expect(() => reentrantRef(context), throwsStateError);
+                  return const SizedBox.shrink();
+                },
+              ),
+            ),
+          ),
+        );
+
+        await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+        await tester.pumpAndSettle();
+
+        expect(inner.disposed, isFalse);
+      },
+    );
   });
 
   group('ScopedFamilyRef', () {
@@ -3615,5 +3894,58 @@ class _Resource implements Disposable {
   @override
   void dispose() {
     disposed = true;
+  }
+}
+
+class _LookupInInitState extends StatefulWidget {
+  const _LookupInInitState({
+    required this.onInit,
+    this.builder,
+  });
+
+  final void Function(BuildContext context) onInit;
+  final WidgetBuilder? builder;
+
+  @override
+  State<_LookupInInitState> createState() => _LookupInInitStateState();
+}
+
+class _LookupInInitStateState extends State<_LookupInInitState> {
+  @override
+  void initState() {
+    super.initState();
+    widget.onInit(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return widget.builder?.call(context) ?? const SizedBox.shrink();
+  }
+}
+
+class _ReadOnDeactivate extends StatefulWidget {
+  const _ReadOnDeactivate({
+    required this.onBuild,
+    required this.onDeactivate,
+  });
+
+  final void Function(BuildContext context) onBuild;
+  final void Function(BuildContext context) onDeactivate;
+
+  @override
+  State<_ReadOnDeactivate> createState() => _ReadOnDeactivateState();
+}
+
+class _ReadOnDeactivateState extends State<_ReadOnDeactivate> {
+  @override
+  void deactivate() {
+    widget.onDeactivate(context);
+    super.deactivate();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    widget.onBuild(context);
+    return const SizedBox.shrink();
   }
 }
