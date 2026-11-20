@@ -11,11 +11,32 @@ on:
         types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
+    # Spell check is advisory: failures are reported as warnings and never fail
+    # the workflow. Job-level `continue-on-error` is not allowed on reusable
+    # workflow calls, so the steps are inlined with step-level tolerance.
     spell-check:
-        uses: VeryGoodOpenSource/very_good_workflows/.github/workflows/spell_check.yml@v1
-        with:
-            includes: "*.md"
-            modified_files_only: true
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: 📚 Git Checkout
+              uses: actions/checkout@v4
+
+            - name: 🪄 Spell Check
+              uses: streetsidesoftware/cspell-action@v9
+              continue-on-error: true
+              with:
+                  config: .github/cspell.json
+                  files: "*.md"
+                  incremental_files_only: true
+
+            - name: 🪄 Spell Check PR Title
+              if: github.event_name == 'pull_request'
+              continue-on-error: true
+              env:
+                  PR_TITLE: ${{ github.event.pull_request.title }}
+              run: |
+                  echo "$PR_TITLE" \
+                    | npx --yes cspell@9 stdin --config .github/cspell.json --no-progress --no-summary
 
     test:
         runs-on: ubuntu-latest
