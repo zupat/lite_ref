@@ -20,10 +20,10 @@ for that key, and wiring up whatever is listening. Overrides are just new
 descriptor instances that share the same `_id`, so they hit the same cache slot
 but build with a different create function.
 
-The design goal of the recent refactor: make invalid states unrepresentable.
-What can be pure (which objects to create, invalidate, dispose) is extracted
-into plain functions; what must stay impure (the cache, binding maps,
-notifications, post-frame scheduling, user disposers) stays in the element.
+A guiding design goal is to make invalid states unrepresentable. What can be
+pure (which objects to create, invalidate, dispose) is extracted into plain
+functions; what must stay impure (the cache, binding maps, notifications,
+post-frame scheduling, user disposers) stays in the element.
 
 ```mermaid
 flowchart LR
@@ -108,8 +108,8 @@ each keeps its own `_createRefObject`.
 
 ## Ownership and lifecycle
 
-Ownership is a sealed hierarchy (`_Ownership<T>`), which removes the booleans
-that used to allow impossible combinations:
+Ownership is a sealed hierarchy (`_Ownership<T>`) whose variants are the only
+valid combinations:
 
 ```mermaid
 flowchart TD
@@ -127,8 +127,7 @@ flowchart TD
   last listener goes away.
 
 A `ScopedObject` additionally has a `_Lifecycle` enum — `live`,
-`awaitingDependentRelease`, `disposed` — replacing a two-boolean state space that
-had one impossible combination.
+`awaitingDependentRelease`, `disposed` — with no other states.
 
 ```mermaid
 stateDiagram-v2
