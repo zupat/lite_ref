@@ -1,6 +1,6 @@
 name: lite_ref
 description: A lightweight dependency injection package with support for overriding for testing.
-version: 0.8.4
+version: 1.0.0
 repository: https://github.com/zupat/lite_ref
 
 environment:
@@ -11,7 +11,7 @@ dependencies:
     basic_interfaces: ^1.0.4
     flutter:
         sdk: flutter
-    lite_ref_core: ^0.1.3
+    lite_ref_core: ^1.0.0
 
 dev_dependencies:
     flutter_test:

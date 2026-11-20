@@ -1,4 +1,8 @@
-## Unreleased
+## 1.0.0
+
+First stable release. The public API of `lite_ref` is now considered stable for
+the 1.x line. This release includes scoped-ref lifecycle and ownership fixes,
+plus one breaking ownership change and one behavior change described below.
 
 -   [Fix] Scoped refs created inside another ref now resolve from the owning
     scope, retain their dependencies, and release them only after dependent
@@ -80,6 +84,8 @@
       ),
     );
     ```
+
+-   [Deps] Requires `lite_ref_core` `^1.0.0`.
 
 ## 0.8.4
 

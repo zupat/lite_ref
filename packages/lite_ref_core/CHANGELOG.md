@@ -1,3 +1,9 @@
+## 1.0.0
+
+First stable release. The public API of `lite_ref_core` is now considered
+stable for the 1.x line. There are no code changes since 0.1.3; this release
+marks the package as stable alongside `lite_ref` 1.0.0.
+
 ## 0.1.3
 
 Patch release that points the package at its new repository location. There are
